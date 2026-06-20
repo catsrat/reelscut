@@ -8,8 +8,9 @@ FROM python:3.11-slim
 # git/cmake to compile whisper.cpp.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
-        libraqm0 libraqm-dev libfreetype6 libharfbuzz0b libfribidi0 \
-        git cmake build-essential curl ca-certificates \
+        git cmake build-essential pkg-config curl ca-certificates \
+        libjpeg-dev zlib1g-dev libfreetype6-dev \
+        libraqm-dev libharfbuzz-dev libfribidi-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Build whisper.cpp -> /usr/local/bin/whisper-cli
