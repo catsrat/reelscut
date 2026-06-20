@@ -55,6 +55,16 @@ TARGET_CLIP = 40
 MOODS = ["upbeat", "calm", "dramatic", "inspirational", "funny", "neutral"]
 
 
+def _proxy_args():
+    """Route yt-dlp through a residential proxy if YTDLP_PROXY is set.
+
+    Residential/mobile proxies make YouTube see a home IP, which gets past the
+    data-center block. Format: http://user:pass@host:port (or socks5://...).
+    """
+    proxy = os.environ.get("YTDLP_PROXY", "").strip()
+    return ["--proxy", proxy] if proxy else []
+
+
 def _run(cmd, cwd=None, timeout=None):
     """Run a command, raising with captured output if it fails or times out."""
     try:
@@ -84,7 +94,7 @@ BROLL_DIR = os.path.join(ROOT, "broll")  # gameplay/b-roll for split-screen mode
 
 def get_title(url):
     try:
-        out = _run(["yt-dlp", "--no-warnings", "--print", "title", url], timeout=45)
+        out = _run(["yt-dlp", "--no-warnings", *_proxy_args(), "--print", "title", url], timeout=45)
         return out.strip() or "Untitled video"
     except Exception:
         return "Untitled video"
@@ -93,7 +103,7 @@ def get_title(url):
 def get_duration(url):
     """Return video length in seconds, or None if it can't be determined."""
     try:
-        out = _run(["yt-dlp", "--no-warnings", "--print", "duration", url], timeout=45)
+        out = _run(["yt-dlp", "--no-warnings", *_proxy_args(), "--print", "duration", url], timeout=45)
         return float(out.strip())
     except Exception:
         return None
@@ -123,6 +133,7 @@ def download_video(url, workdir):
     cmd = [
         "yt-dlp",
         "--no-warnings",
+        *_proxy_args(),
         "-f", "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b/best",
         # Try phone/TV YouTube clients — they often return video formats when
         # the default web client is blocked (the "format not available" error).
@@ -156,13 +167,12 @@ def download_video(url, workdir):
     try:
         _run(cmd, timeout=900)
     except RuntimeError as e:
-        if "confirm you" in str(e) or "bot" in str(e).lower():
+        msg = str(e).lower()
+        if "confirm you" in msg or "bot" in msg or "format is not available" in msg:
             raise RuntimeError(
-                "YouTube blocked this download (anti-bot check). Set the "
-                "environment variable YT_COOKIES_BROWSER to a browser where "
-                "you're logged into YouTube, e.g. `export YT_COOKIES_BROWSER=chrome`, "
-                "then restart the app. (This is exactly why a real product should "
-                "have users upload their own files instead of pasting links.)"
+                "YouTube blocked this download from the server. A residential "
+                "proxy is required — set YTDLP_PROXY (http://user:pass@host:port) "
+                "in the environment. (Or have users upload their files instead.)"
             )
         raise
     matches = glob.glob(os.path.join(workdir, "source.*"))
