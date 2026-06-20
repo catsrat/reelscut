@@ -119,7 +119,7 @@ def download_video(url, workdir):
     cmd = [
         "yt-dlp",
         "--no-warnings",
-        "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
+        "-f", "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b/best",
         "--merge-output-format", "mp4",
         "--retries", "10",
         "--fragment-retries", "20",
@@ -134,7 +134,15 @@ def download_video(url, workdir):
     cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
     browser = os.environ.get("YT_COOKIES_BROWSER", "").strip()
     if cookies_file and os.path.exists(cookies_file):
-        cmd += ["--cookies", cookies_file]
+        # yt-dlp rewrites the cookie jar on exit, but Render Secret Files are
+        # read-only — copy to a writable path first.
+        import shutil as _sh
+        writable = os.path.join(workdir, "cookies.txt")
+        try:
+            _sh.copyfile(cookies_file, writable)
+            cmd += ["--cookies", writable]
+        except Exception:
+            cmd += ["--cookies", cookies_file]
     elif browser:
         cmd += ["--cookies-from-browser", browser]
     cmd.append(url)
