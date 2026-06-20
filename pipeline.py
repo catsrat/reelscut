@@ -124,6 +124,9 @@ def download_video(url, workdir):
         "yt-dlp",
         "--no-warnings",
         "-f", "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b/best",
+        # Try phone/TV YouTube clients — they often return video formats when
+        # the default web client is blocked (the "format not available" error).
+        "--extractor-args", "youtube:player_client=ios,tv,android,web",
         "--merge-output-format", "mp4",
         "--retries", "10",
         "--fragment-retries", "20",
