@@ -61,7 +61,7 @@
   {% endif %}
 
   <div class="card">
-    {% if has_ytdlp %}
+    {% if show_link %}
     <div class="tabs">
       <button type="button" class="tab active" id="tab-upload">Upload a file</button>
       <button type="button" class="tab" id="tab-link">YouTube link</button>
@@ -71,7 +71,7 @@
       <input id="file" type="file" accept="video/*">
       <p class="hint">Upload any video — we'll turn it into short clips.</p>
     </div>
-    {% if has_ytdlp %}
+    {% if show_link %}
     <div id="pane-link" style="display:none">
       <input id="url" type="text" placeholder="https://www.youtube.com/watch?v=...">
     </div>

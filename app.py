@@ -106,10 +106,16 @@ def _start_job(opts):
 @app.route("/")
 def index():
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
-    # The YouTube-link tab only works where yt-dlp is installed (local dev).
-    # In the cloud container it isn't, so show upload-only there.
-    has_ytdlp = bool(shutil.which("yt-dlp"))
-    return render_template("index.html", has_key=has_key, has_ytdlp=has_ytdlp)
+    # Upload-first: only show the YouTube-link tab where it can actually work —
+    # i.e. yt-dlp is present AND cookies are configured to get past YouTube's
+    # bot check. Otherwise show a clean upload-only interface.
+    cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+    has_cookies = bool(
+        (cookies_file and os.path.exists(cookies_file))
+        or os.environ.get("YT_COOKIES_BROWSER", "").strip()
+    )
+    show_link = bool(shutil.which("yt-dlp")) and has_cookies
+    return render_template("index.html", has_key=has_key, show_link=show_link)
 
 
 @app.route("/process", methods=["POST"])
