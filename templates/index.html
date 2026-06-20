@@ -226,7 +226,7 @@ function render(jobId, clips){
   if (!clips.length){ results.innerHTML = '<div class="card">No clips found.</div>'; return; }
   results.innerHTML = '<div class="card"><b>'+clips.length+' reels ready</b></div>';
   for (const c of clips){
-    const src = '/clip/'+jobId+'/'+c.file;
+    const src = c.url || ('/clip/'+jobId+'/'+c.file);
     const div = document.createElement('div');
     div.className = 'card clip';
     div.innerHTML =

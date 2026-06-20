@@ -19,6 +19,7 @@ from flask import (
 from werkzeug.utils import secure_filename
 
 import pipeline
+import storage
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024 * 1024  # 4 GB uploads
@@ -72,6 +73,14 @@ def _worker(job_id, opts):
             cam_corner=opts["cam_corner"], cam_size=opts["cam_size"],
             source_file=source_file,
         )
+        # If R2 is configured, upload clips and attach durable URLs.
+        if storage.enabled():
+            for r in results:
+                url = storage.upload_and_url(
+                    os.path.join(workdir, r["file"]), f"{job_id}/{r['file']}"
+                )
+                if url:
+                    r["url"] = url
         job["clips"] = results
         job["status"] = "done"
     except Exception as e:  # surface the real error to the UI
