@@ -55,11 +55,15 @@ TARGET_CLIP = 40
 MOODS = ["upbeat", "calm", "dramatic", "inspirational", "funny", "neutral"]
 
 
-def _run(cmd, cwd=None):
-    """Run a command, raising with captured output if it fails."""
-    proc = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, errors="replace"
-    )
+def _run(cmd, cwd=None, timeout=None):
+    """Run a command, raising with captured output if it fails or times out."""
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Timed out after {timeout}s: {' '.join(cmd[:2])}")
     if proc.returncode != 0:
         raise RuntimeError(
             f"Command failed: {' '.join(cmd)}\n{proc.stderr[-2000:]}"
@@ -80,7 +84,7 @@ BROLL_DIR = os.path.join(ROOT, "broll")  # gameplay/b-roll for split-screen mode
 
 def get_title(url):
     try:
-        out = _run(["yt-dlp", "--no-warnings", "--print", "title", url])
+        out = _run(["yt-dlp", "--no-warnings", "--print", "title", url], timeout=45)
         return out.strip() or "Untitled video"
     except Exception:
         return "Untitled video"
@@ -89,7 +93,7 @@ def get_title(url):
 def get_duration(url):
     """Return video length in seconds, or None if it can't be determined."""
     try:
-        out = _run(["yt-dlp", "--no-warnings", "--print", "duration", url])
+        out = _run(["yt-dlp", "--no-warnings", "--print", "duration", url], timeout=45)
         return float(out.strip())
     except Exception:
         return None
@@ -147,7 +151,7 @@ def download_video(url, workdir):
         cmd += ["--cookies-from-browser", browser]
     cmd.append(url)
     try:
-        _run(cmd)
+        _run(cmd, timeout=900)
     except RuntimeError as e:
         if "confirm you" in str(e) or "bot" in str(e).lower():
             raise RuntimeError(
