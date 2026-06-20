@@ -13,9 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libraqm-dev libharfbuzz-dev libfribidi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Build whisper.cpp -> /usr/local/bin/whisper-cli
+# Build whisper.cpp -> /usr/local/bin/whisper-cli (static = no separate .so files)
 RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/whisper \
-    && cmake -S /tmp/whisper -B /tmp/whisper/build -DCMAKE_BUILD_TYPE=Release \
+    && cmake -S /tmp/whisper -B /tmp/whisper/build \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
     && cmake --build /tmp/whisper/build -j --config Release \
     && cp /tmp/whisper/build/bin/whisper-cli /usr/local/bin/whisper-cli \
     && rm -rf /tmp/whisper
