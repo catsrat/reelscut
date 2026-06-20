@@ -128,10 +128,14 @@ def download_video(url, workdir):
         "-o", out_tmpl,
     ]
     # YouTube increasingly blocks anonymous downloads ("confirm you're not a
-    # bot"). Borrowing a logged-in browser's cookies gets past it.
-    # Set YT_COOKIES_BROWSER=chrome (or safari/firefox/brave/edge).
+    # bot"). Cookies get past it:
+    #  - local dev: YT_COOKIES_BROWSER=chrome (borrow the logged-in browser)
+    #  - server: YTDLP_COOKIES_FILE=/path/to/cookies.txt (exported cookies)
+    cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
     browser = os.environ.get("YT_COOKIES_BROWSER", "").strip()
-    if browser:
+    if cookies_file and os.path.exists(cookies_file):
+        cmd += ["--cookies", cookies_file]
+    elif browser:
         cmd += ["--cookies-from-browser", browser]
     cmd.append(url)
     try:

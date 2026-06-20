@@ -61,17 +61,21 @@
   {% endif %}
 
   <div class="card">
+    {% if has_ytdlp %}
     <div class="tabs">
       <button type="button" class="tab active" id="tab-upload">Upload a file</button>
       <button type="button" class="tab" id="tab-link">YouTube link</button>
     </div>
+    {% endif %}
     <div id="pane-upload">
       <input id="file" type="file" accept="video/*">
-      <p class="hint">Recommended — works with any video, no link needed.</p>
+      <p class="hint">Upload any video — we'll turn it into short clips.</p>
     </div>
+    {% if has_ytdlp %}
     <div id="pane-link" style="display:none">
       <input id="url" type="text" placeholder="https://www.youtube.com/watch?v=...">
     </div>
+    {% endif %}
     <label class="lbl" for="lang">Spoken language</label>
     <select id="lang">
       <option value="en">English (fastest)</option>
@@ -145,14 +149,16 @@ const results = document.getElementById('results');
 let mode = 'upload';
 const tabUpload = document.getElementById('tab-upload');
 const tabLink = document.getElementById('tab-link');
-tabUpload.onclick = () => setMode('upload');
-tabLink.onclick = () => setMode('link');
+if (tabUpload) tabUpload.onclick = () => setMode('upload');
+if (tabLink) tabLink.onclick = () => setMode('link');
 function setMode(m){
   mode = m;
-  tabUpload.classList.toggle('active', m==='upload');
-  tabLink.classList.toggle('active', m==='link');
-  document.getElementById('pane-upload').style.display = m==='upload' ? 'block':'none';
-  document.getElementById('pane-link').style.display = m==='link' ? 'block':'none';
+  if (tabUpload) tabUpload.classList.toggle('active', m==='upload');
+  if (tabLink) tabLink.classList.toggle('active', m==='link');
+  const pu = document.getElementById('pane-upload');
+  const pl = document.getElementById('pane-link');
+  if (pu) pu.style.display = m==='upload' ? 'block':'none';
+  if (pl) pl.style.display = m==='link' ? 'block':'none';
 }
 
 function opts(){

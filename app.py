@@ -10,6 +10,7 @@ using a simple fallback selector.
 """
 
 import os
+import shutil
 import threading
 import uuid
 
@@ -105,7 +106,10 @@ def _start_job(opts):
 @app.route("/")
 def index():
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
-    return render_template("index.html", has_key=has_key)
+    # The YouTube-link tab only works where yt-dlp is installed (local dev).
+    # In the cloud container it isn't, so show upload-only there.
+    has_ytdlp = bool(shutil.which("yt-dlp"))
+    return render_template("index.html", has_key=has_key, has_ytdlp=has_ytdlp)
 
 
 @app.route("/process", methods=["POST"])
