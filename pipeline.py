@@ -41,7 +41,7 @@ WHISPER_THREADS = max(4, (os.cpu_count() or 4) - 2)
 SARVAM_URL = "https://api.sarvam.ai/speech-to-text"
 SARVAM_CHUNK_SECS = 20      # bigger chunks = fewer API calls (REST limit is <30s)
 SARVAM_WORKERS = 2          # low concurrency to stay under rate limits
-_SARVAM_LANG = {"te": "te-IN", "hi": "hi-IN", "ta": "ta-IN"}
+_SARVAM_LANG = {"te": "te-IN", "hi": "hi-IN", "ta": "ta-IN", "en": "en-IN"}
 
 # Target each clip at this length window (seconds). Short = better for
 # Shorts/Reels/TikTok. Claude aims for the sweet spot; fallback uses these.
@@ -223,7 +223,7 @@ def transcribe(audio_path, workdir, model_path=MODEL_PATH, language="en"):
     # ("te", "hi", ...) or "auto" to detect it.
     if language and language != "en":
         cmd += ["-l", language]
-    _run(cmd)
+    _run(cmd, timeout=1800)  # safety net so a slow CPU run can't hang forever
     # whisper.cpp can split a multi-byte character across segments, producing
     # invalid UTF-8 in the JSON for non-Latin scripts — decode tolerantly.
     with open(out_base + ".json", encoding="utf-8", errors="replace") as f:
@@ -925,7 +925,12 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
     progress(30, "Extracting audio...")
     audio = extract_audio(video, workdir)
 
-    use_sarvam = (language != "en") and bool(sarvam_key)
+    # Non-English always uses Sarvam (accurate). English uses the local model by
+    # default (fast on a GPU Mac), but set PREFER_SARVAM=1 in the cloud — where
+    # there's no GPU — to route English through Sarvam too and stay fast.
+    prefer_sarvam = os.environ.get("PREFER_SARVAM", "").strip().lower() in (
+        "1", "true", "yes")
+    use_sarvam = bool(sarvam_key) and (language != "en" or prefer_sarvam)
     if use_sarvam:
         progress(45, "Transcribing with Sarvam (Indian-language engine)...")
         words = transcribe_sarvam(audio, workdir, language, sarvam_key, progress)
