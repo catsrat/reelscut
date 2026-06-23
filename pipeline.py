@@ -134,7 +134,7 @@ def download_video(url, workdir):
         "yt-dlp",
         "--no-warnings",
         *_proxy_args(),
-        "-f", "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b/best",
+        "-f", "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/best",
         # Try phone/TV YouTube clients — they often return video formats when
         # the default web client is blocked (the "format not available" error).
         "--extractor-args", "youtube:player_client=ios,tv,android,web",
@@ -511,7 +511,9 @@ def _sanitize_clips(clips, segments):
 # 1080x1920 PNG with Pillow and composite it with the `overlay` filter, which
 # the build does include.
 
-W, H = 1080, 1920
+# 720x1280 (not 1080x1920): far faster to encode on a CPU server and looks
+# basically identical on phones. Halves render + download time.
+W, H = 720, 1280
 # All fonts are bundled in fonts/ so the app renders identically on macOS and
 # Linux (no dependency on OS system fonts — needed for the cloud/Docker worker).
 _FONTS_DIR = os.path.join(ROOT, "fonts")
@@ -523,7 +525,7 @@ def _font(name):
 
 FONT_PATH = _font("NotoSans-Bold.ttf")     # Latin fallback / "classic" style
 UNICODE_FONT = _font("NotoSans-Bold.ttf")  # broad fallback for unmapped scripts
-FONT_SIZE = 88               # big, punchy reel-style captions
+FONT_SIZE = 60               # big, punchy reel-style captions (scaled for 720w)
 CAPTION_CENTER_Y = 0.66      # vertical center of captions (fraction of height)
 MAX_CHUNK_WORDS = 3          # words shown on screen at once
 MAX_CHUNK_SECS = 1.6
@@ -638,7 +640,7 @@ def _render_caption_png(text, png_path, style=None):
         lines.append(cur)
 
     line_h = int(FONT_SIZE * 1.2)
-    pad = 30
+    pad = 22
     strip_h = line_h * len(lines) + 2 * pad
     img = Image.new("RGBA", (W, strip_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -647,7 +649,7 @@ def _render_caption_png(text, png_path, style=None):
         x = (W - font.getlength(line)) / 2
         draw.text(
             (x, y), line, font=font, fill=color,
-            stroke_width=10, stroke_fill=(0, 0, 0, 255),
+            stroke_width=7, stroke_fill=(0, 0, 0, 255),
         )
         y += line_h
     img.save(png_path)
@@ -780,8 +782,8 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     if tighten:
         vchain += f"select='{keep_expr}',setpts=N/FRAME_RATE/TB,"
 
-    half = ("scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
-            "crop=1080:960")
+    half = (f"scale={W}:{H // 2}:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={W}:{H // 2}")
     if split_mode == "facecam":
         # One source: game -> top, cropped corner cam -> bottom.
         x_expr, y_expr = _CAM_CORNER.get(cam_corner, _CAM_CORNER["bottom-right"])
@@ -808,8 +810,8 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
             "[top][bot]vstack=inputs=2:shortest=1[base]",
         ]
     else:
-        crop = ("scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
-                "crop=1080:1920")
+        crop = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={W}:{H}")
         parts = [f"{vchain}{crop}[base]"]
 
     last = "base"
