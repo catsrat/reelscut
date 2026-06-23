@@ -94,7 +94,7 @@ BROLL_DIR = os.path.join(ROOT, "broll")  # gameplay/b-roll for split-screen mode
 
 def get_title(url):
     try:
-        out = _run(["yt-dlp", "--no-warnings", *_proxy_args(), "--print", "title", url], timeout=45)
+        out = _run(["yt-dlp", "--no-warnings", *_proxy_args(), "--print", "title", url], timeout=70)
         return out.strip() or "Untitled video"
     except Exception:
         return "Untitled video"
@@ -103,7 +103,7 @@ def get_title(url):
 def get_duration(url):
     """Return video length in seconds, or None if it can't be determined."""
     try:
-        out = _run(["yt-dlp", "--no-warnings", *_proxy_args(), "--print", "duration", url], timeout=45)
+        out = _run(["yt-dlp", "--no-warnings", *_proxy_args(), "--print", "duration", url], timeout=70)
         return float(out.strip())
     except Exception:
         return None
@@ -139,10 +139,11 @@ def download_video(url, workdir):
         # the default web client is blocked (the "format not available" error).
         "--extractor-args", "youtube:player_client=ios,tv,android,web",
         "--merge-output-format", "mp4",
-        "--retries", "10",
+        "--retries", "15",
         "--fragment-retries", "20",
-        "--concurrent-fragments", "4",
-        "--socket-timeout", "30",
+        "--extractor-retries", "5",
+        "--concurrent-fragments", "2",
+        "--socket-timeout", "60",
         "-o", out_tmpl,
     ]
     # YouTube increasingly blocks anonymous downloads ("confirm you're not a
