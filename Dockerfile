@@ -36,9 +36,9 @@ RUN mkdir -p models \
     && curl -sL -o models/ggml-base.en.bin \
        https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 
-ENV PORT=8080
-EXPOSE 8080
+# Hugging Face Spaces routes to 7860; Render injects its own $PORT (which wins).
+ENV PORT=7860
+EXPOSE 7860
 
-# Single worker: the app keeps job state in memory and runs one job at a time.
-CMD ["gunicorn", "-w", "1", "--threads", "8", "--timeout", "0", \
-     "-b", "0.0.0.0:8080", "app:app"]
+# Shell form so $PORT expands. Single worker: job state is in memory, one at a time.
+CMD gunicorn -w 1 --threads 8 --timeout 0 -b 0.0.0.0:$PORT app:app
