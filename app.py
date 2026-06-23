@@ -115,11 +115,12 @@ def index():
     # i.e. yt-dlp is present AND cookies are configured to get past YouTube's
     # bot check. Otherwise show a clean upload-only interface.
     cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
-    has_cookies = bool(
+    has_access = bool(
         (cookies_file and os.path.exists(cookies_file))
         or os.environ.get("YT_COOKIES_BROWSER", "").strip()
+        or os.environ.get("YTDLP_PROXY", "").strip()  # proxy makes links work in cloud
     )
-    show_link = bool(shutil.which("yt-dlp")) and has_cookies
+    show_link = bool(shutil.which("yt-dlp")) and has_access
     return render_template("index.html", has_key=has_key, show_link=show_link)
 
 
