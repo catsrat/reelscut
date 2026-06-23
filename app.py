@@ -104,6 +104,11 @@ def _start_job(opts):
 
 
 @app.route("/")
+def landing():
+    return render_template("landing.html")
+
+
+@app.route("/app")
 def index():
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
     # Upload-first: only show the YouTube-link tab where it can actually work —
