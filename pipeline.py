@@ -612,17 +612,15 @@ def _caption_chunks(words, start, end):
     return chunks
 
 
-def _render_caption_png(text, png_path, style=None, center_y=CAPTION_CENTER_Y):
+def _render_caption_png(text, png_path, style=None):
+    """Render captions onto a SHORT strip (not a full frame) to save memory.
+    Returns the strip height so the caller knows where to overlay it."""
     from PIL import Image, ImageDraw
 
     style = CAPTION_STYLES.get(style or DEFAULT_STYLE, CAPTION_STYLES[DEFAULT_STYLE])
-    is_latin = all(ord(c) < 0x250 for c in text)
-    if style["upper"] and is_latin:
+    if style["upper"] and all(ord(c) < 0x250 for c in text):
         text = text.upper()
     color = style["color"] + (255,)
-
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
     font = _font_for(text, FONT_SIZE, style["font"])
 
     margin = 80
@@ -631,7 +629,7 @@ def _render_caption_png(text, png_path, style=None, center_y=CAPTION_CENTER_Y):
     lines, cur = [], ""
     for word in words:
         test = (cur + " " + word).strip()
-        if draw.textlength(test, font=font) <= max_w or not cur:
+        if font.getlength(test) <= max_w or not cur:
             cur = test
         else:
             lines.append(cur)
@@ -640,17 +638,20 @@ def _render_caption_png(text, png_path, style=None, center_y=CAPTION_CENTER_Y):
         lines.append(cur)
 
     line_h = int(FONT_SIZE * 1.2)
-    total_h = line_h * len(lines)
-    y = int(H * center_y) - total_h // 2
+    pad = 30
+    strip_h = line_h * len(lines) + 2 * pad
+    img = Image.new("RGBA", (W, strip_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    y = pad
     for line in lines:
-        w = draw.textlength(line, font=font)
-        x = (W - w) / 2
+        x = (W - font.getlength(line)) / 2
         draw.text(
             (x, y), line, font=font, fill=color,
             stroke_width=10, stroke_fill=(0, 0, 0, 255),
         )
         y += line_h
     img.save(png_path)
+    return strip_h
 
 
 # Aggressive dead-space removal (jump cuts): cut pauses longer than this.
@@ -753,9 +754,12 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     cap_center = 0.5 if split else CAPTION_CENTER_Y  # captions on the seam when split
 
     inputs = ["-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", video_path]
+    cap_ys = []
     for i, (_, _, text) in enumerate(caps):
         png = os.path.join(out_dir, f"cap_{index:02d}_{i}.png")
-        _render_caption_png(text, png, caption_style, cap_center)
+        strip_h = _render_caption_png(text, png, caption_style)
+        oy = max(0, min(H - strip_h, int(H * cap_center - strip_h / 2)))
+        cap_ys.append(oy)
         inputs += ["-i", os.path.abspath(png)]
 
     nxt_idx = 1 + len(caps)  # 0=video, 1..len=caption pngs
@@ -812,7 +816,7 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     for i, (rs, re_, _) in enumerate(caps):
         nxt = f"v{i}"
         parts.append(
-            f"[{last}][{i + 1}:v]overlay=0:0:"
+            f"[{last}][{i + 1}:v]overlay=0:{cap_ys[i]}:"
             f"enable='between(t,{rs:.2f},{re_:.2f})'[{nxt}]"
         )
         last = nxt
