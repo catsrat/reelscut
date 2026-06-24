@@ -26,7 +26,8 @@ WORKDIR /app
 # Python deps (install Pillow from source so it links libraqm for Indic shaping).
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir --no-binary Pillow --force-reinstall Pillow
+    && pip install --no-cache-dir --no-binary Pillow --force-reinstall Pillow \
+    && pip install --no-cache-dir -U "yt-dlp[default]"  # latest yt-dlp for YouTube/SABR fixes
 
 # App code (fonts/, music/, broll/, templates/, *.py)
 COPY . .
