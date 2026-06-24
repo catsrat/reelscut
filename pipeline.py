@@ -737,9 +737,14 @@ def _caption_chunks(words, start, end, max_words=MAX_CHUNK_WORDS):
     return chunks
 
 
-def _render_caption_png(text, png_path, style=None, font_size=FONT_SIZE):
-    """Render captions onto a SHORT strip (not a full frame) to save memory.
-    Returns the strip height so the caller knows where to overlay it."""
+def _render_caption_png(text, png_path, style=None, font_size=FONT_SIZE,
+                        center_y=CAPTION_CENTER_Y):
+    """Render a caption onto a FULL WxH transparent frame, centred at center_y.
+
+    Full-frame (not a strip) so every caption is the same size and can be
+    concatenated into ONE transparent caption track + a SINGLE overlay — which
+    scales to hundreds of captions. (One image-input per caption does NOT scale:
+    a long/punchy clip hits ffmpeg's input/decoder limit.)"""
     from PIL import Image, ImageDraw
 
     style = CAPTION_STYLES.get(style or DEFAULT_STYLE, CAPTION_STYLES[DEFAULT_STYLE])
@@ -766,9 +771,9 @@ def _render_caption_png(text, png_path, style=None, font_size=FONT_SIZE):
     pad = 22
     stroke = max(6, int(font_size * 0.11))
     strip_h = line_h * len(lines) + 2 * pad
-    img = Image.new("RGBA", (W, strip_h), (0, 0, 0, 0))
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    y = pad
+    y = max(0, min(H - strip_h, int(H * center_y - strip_h / 2))) + pad
     for line in lines:
         x = (W - font.getlength(line)) / 2
         draw.text(
@@ -777,7 +782,6 @@ def _render_caption_png(text, png_path, style=None, font_size=FONT_SIZE):
         )
         y += line_h
     img.save(png_path)
-    return strip_h
 
 
 # Aggressive dead-space removal (jump cuts): cut pauses longer than this.
@@ -893,15 +897,39 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     cap_center = 0.5 if split else CAPTION_CENTER_Y  # captions on the seam when split
 
     inputs = ["-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", video_path]
-    cap_ys = []
-    for i, (_, _, text) in enumerate(caps):
-        png = os.path.join(out_dir, f"cap_{index:02d}_{i}.png")
-        strip_h = _render_caption_png(text, png, caption_style, cap_font)
-        oy = max(0, min(H - strip_h, int(H * cap_center - strip_h / 2)))
-        cap_ys.append(oy)
-        inputs += ["-i", os.path.abspath(png)]
 
-    nxt_idx = 1 + len(caps)  # 0=video, 1..len=caption pngs
+    # Captions -> ONE transparent track via the concat demuxer (full-frame PNGs
+    # with transparent filler for gaps), overlaid ONCE. This scales to any number
+    # of captions; one image-input per caption hits ffmpeg's input/decoder limit
+    # ("Resource temporarily unavailable") on long or punchy clips.
+    cap_idx = None
+    timeline_end = kept if tighten else duration
+    if caps:
+        blank = os.path.abspath(os.path.join(out_dir, f"capblank_{index:02d}.png"))
+        from PIL import Image as _Img
+        _Img.new("RGBA", (W, H), (0, 0, 0, 0)).save(blank)
+        lines = ["ffconcat version 1.0"]
+        cursor = 0.0
+        for i, (rs, re_, text) in enumerate(caps):
+            if rs - cursor > 0.001:
+                lines.append(f"file '{blank}'")
+                lines.append(f"duration {rs - cursor:.3f}")
+            png = os.path.abspath(os.path.join(out_dir, f"cap_{index:02d}_{i}.png"))
+            _render_caption_png(text, png, caption_style, cap_font, cap_center)
+            lines.append(f"file '{png}'")
+            lines.append(f"duration {max(0.04, re_ - rs):.3f}")
+            cursor = re_
+        if timeline_end - cursor > 0.001:
+            lines.append(f"file '{blank}'")
+            lines.append(f"duration {timeline_end - cursor:.3f}")
+        lines.append(f"file '{blank}'")  # concat drops the last duration; repeat
+        concat_file = os.path.join(out_dir, f"caps_{index:02d}.txt")
+        with open(concat_file, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        inputs += ["-f", "concat", "-safe", "0", "-i", concat_file]
+        cap_idx = 1  # 0=video, 1=caption track
+
+    nxt_idx = 1 + (1 if cap_idx is not None else 0)
     broll_idx = None
     if split_mode == "broll":
         inputs += ["-stream_loop", "-1", "-i", os.path.abspath(broll_path)]
@@ -973,13 +1001,10 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
         base_label = "basefx"
 
     last = base_label
-    for i, (rs, re_, _) in enumerate(caps):
-        nxt = f"v{i}"
-        parts.append(
-            f"[{last}][{i + 1}:v]overlay=0:{cap_ys[i]}:"
-            f"enable='between(t,{rs:.2f},{re_:.2f})'[{nxt}]"
-        )
-        last = nxt
+    if cap_idx is not None:
+        # Single overlay of the whole caption track (already positioned per-frame).
+        parts.append(f"[{last}][{cap_idx}:v]overlay=0:0[capped]")
+        last = "capped"
 
     # Logo/watermark: scale to a fraction of the width, sit in a padded corner
     # on top of everything (always visible), clear of the centred captions.
