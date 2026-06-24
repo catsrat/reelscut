@@ -118,9 +118,9 @@ def _worker(job_id, opts):
     try:
         source_file = opts.get("source_file")
         url = opts.get("url")
-        job["title"] = opts.get("title") or (
-            pipeline.get_title(url) if url else "Your video"
-        )
+        # Skip the slow yt-dlp title probe (cosmetic) so the download starts
+        # right away — each clip gets its own AI title anyway.
+        job["title"] = opts.get("title") or "Your video"
         api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
         job["ai"] = bool(api_key)
         sarvam_key = os.environ.get("SARVAM_API_KEY", "").strip()
