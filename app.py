@@ -111,17 +111,20 @@ def landing():
 @app.route("/app")
 def index():
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
-    # Upload-first: only show the YouTube-link tab where it can actually work —
-    # i.e. yt-dlp is present AND cookies are configured to get past YouTube's
-    # bot check. Otherwise show a clean upload-only interface.
+    # Show the link tab whenever yt-dlp is available: Google Drive links work
+    # with no setup at all (Drive doesn't block servers). YouTube links also
+    # work here, but only reliably when a proxy/cookies are configured —
+    # `yt_enabled` tells the UI whether to advertise YouTube as ready.
     cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
-    has_access = bool(
+    yt_enabled = bool(
         (cookies_file and os.path.exists(cookies_file))
         or os.environ.get("YT_COOKIES_BROWSER", "").strip()
         or os.environ.get("YTDLP_PROXY", "").strip()  # proxy makes links work in cloud
     )
-    show_link = bool(shutil.which("yt-dlp")) and has_access
-    return render_template("index.html", has_key=has_key, show_link=show_link)
+    show_link = bool(shutil.which("yt-dlp"))
+    return render_template(
+        "index.html", has_key=has_key, show_link=show_link, yt_enabled=yt_enabled
+    )
 
 
 @app.route("/process", methods=["POST"])

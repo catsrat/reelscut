@@ -65,6 +65,13 @@ def _proxy_args():
     return ["--proxy", proxy] if proxy else []
 
 
+def _is_gdrive(url):
+    """True for Google Drive share links. Drive doesn't block servers the way
+    YouTube does, so these download for free with no proxy and no bot checks."""
+    u = (url or "").lower()
+    return "drive.google.com" in u or "docs.google.com" in u
+
+
 def _run(cmd, cwd=None, timeout=None):
     """Run a command, raising with captured output if it fails or times out."""
     try:
@@ -93,8 +100,10 @@ BROLL_DIR = os.path.join(ROOT, "broll")  # gameplay/b-roll for split-screen mode
 
 
 def get_title(url):
+    # Drive needs no proxy; skip it so a flaky proxy can't slow the metadata call.
+    proxy = [] if _is_gdrive(url) else _proxy_args()
     try:
-        out = _run(["yt-dlp", "--no-warnings", *_proxy_args(), "--print", "title", url], timeout=70)
+        out = _run(["yt-dlp", "--no-warnings", *proxy, "--print", "title", url], timeout=70)
         return out.strip() or "Untitled video"
     except Exception:
         return "Untitled video"
@@ -102,8 +111,9 @@ def get_title(url):
 
 def get_duration(url):
     """Return video length in seconds, or None if it can't be determined."""
+    proxy = [] if _is_gdrive(url) else _proxy_args()
     try:
-        out = _run(["yt-dlp", "--no-warnings", *_proxy_args(), "--print", "duration", url], timeout=70)
+        out = _run(["yt-dlp", "--no-warnings", *proxy, "--print", "duration", url], timeout=70)
         return float(out.strip())
     except Exception:
         return None
@@ -130,52 +140,78 @@ def download_video(url, workdir):
     Retries and parallel fragments make flaky connections less fatal.
     """
     out_tmpl = os.path.join(workdir, "source.%(ext)s")
-    cmd = [
-        "yt-dlp",
-        "--no-warnings",
-        *_proxy_args(),
-        "-f", "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/best",
-        # Try phone/TV YouTube clients — they often return video formats when
-        # the default web client is blocked (the "format not available" error).
-        "--extractor-args", "youtube:player_client=ios,tv,android,web",
-        "--merge-output-format", "mp4",
-        "--retries", "15",
-        "--fragment-retries", "20",
-        "--extractor-retries", "5",
-        "--concurrent-fragments", "2",
-        "--socket-timeout", "60",
-        "-o", out_tmpl,
-    ]
-    # YouTube increasingly blocks anonymous downloads ("confirm you're not a
-    # bot"). Cookies get past it:
-    #  - local dev: YT_COOKIES_BROWSER=chrome (borrow the logged-in browser)
-    #  - server: YTDLP_COOKIES_FILE=/path/to/cookies.txt (exported cookies)
-    cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
-    browser = os.environ.get("YT_COOKIES_BROWSER", "").strip()
-    if cookies_file and os.path.exists(cookies_file):
-        # yt-dlp rewrites the cookie jar on exit, but Render Secret Files are
-        # read-only — copy to a writable path first.
-        import shutil as _sh
-        writable = os.path.join(workdir, "cookies.txt")
+
+    if _is_gdrive(url):
+        # Google Drive: a single shared file, no proxy and no bot checks needed.
+        # `best` just grabs the file as-is. Works for "Anyone with the link" files.
+        cmd = [
+            "yt-dlp", "--no-warnings",
+            "-f", "best",
+            "--retries", "10",
+            "--socket-timeout", "60",
+            "-o", out_tmpl,
+            url,
+        ]
         try:
-            _sh.copyfile(cookies_file, writable)
-            cmd += ["--cookies", writable]
-        except Exception:
-            cmd += ["--cookies", cookies_file]
-    elif browser:
-        cmd += ["--cookies-from-browser", browser]
-    cmd.append(url)
-    try:
-        _run(cmd, timeout=900)
-    except RuntimeError as e:
-        msg = str(e).lower()
-        if "confirm you" in msg or "bot" in msg or "format is not available" in msg:
-            raise RuntimeError(
-                "YouTube blocked this download from the server. A residential "
-                "proxy is required — set YTDLP_PROXY (http://user:pass@host:port) "
-                "in the environment. (Or have users upload their files instead.)"
-            )
-        raise
+            _run(cmd, timeout=900)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if "permission" in msg or "not be downloaded" in msg or "quota" in msg \
+                    or "private" in msg or "access" in msg:
+                raise RuntimeError(
+                    "Couldn't download this Google Drive file. Make sure it's "
+                    "shared as “Anyone with the link” (Share → General "
+                    "access → Anyone with the link), then paste the link again."
+                )
+            raise
+    else:
+        cmd = [
+            "yt-dlp",
+            "--no-warnings",
+            *_proxy_args(),
+            "-f", "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/best",
+            # Try phone/TV YouTube clients — they often return video formats when
+            # the default web client is blocked (the "format not available" error).
+            "--extractor-args", "youtube:player_client=ios,tv,android,web",
+            "--merge-output-format", "mp4",
+            "--retries", "15",
+            "--fragment-retries", "20",
+            "--extractor-retries", "5",
+            "--concurrent-fragments", "2",
+            "--socket-timeout", "60",
+            "-o", out_tmpl,
+        ]
+        # YouTube increasingly blocks anonymous downloads ("confirm you're not a
+        # bot"). Cookies get past it:
+        #  - local dev: YT_COOKIES_BROWSER=chrome (borrow the logged-in browser)
+        #  - server: YTDLP_COOKIES_FILE=/path/to/cookies.txt (exported cookies)
+        cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+        browser = os.environ.get("YT_COOKIES_BROWSER", "").strip()
+        if cookies_file and os.path.exists(cookies_file):
+            # yt-dlp rewrites the cookie jar on exit, but Render Secret Files are
+            # read-only — copy to a writable path first.
+            import shutil as _sh
+            writable = os.path.join(workdir, "cookies.txt")
+            try:
+                _sh.copyfile(cookies_file, writable)
+                cmd += ["--cookies", writable]
+            except Exception:
+                cmd += ["--cookies", cookies_file]
+        elif browser:
+            cmd += ["--cookies-from-browser", browser]
+        cmd.append(url)
+        try:
+            _run(cmd, timeout=900)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if "confirm you" in msg or "bot" in msg or "format is not available" in msg:
+                raise RuntimeError(
+                    "YouTube blocked this download from the server. A residential "
+                    "proxy is required — set YTDLP_PROXY (http://user:pass@host:port) "
+                    "in the environment. (Or upload the file, or paste a Google "
+                    "Drive link instead — Drive needs no proxy.)"
+                )
+            raise
     matches = glob.glob(os.path.join(workdir, "source.*"))
     # Prefer mp4 if multiple intermediate files exist.
     mp4 = [m for m in matches if m.endswith(".mp4")]
@@ -929,6 +965,10 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
     if not source_file:
         progress(5, "Downloading video...")
         video = download_video(url, workdir)
+        # Drive (and some sources) don't report duration up front — probe the
+        # downloaded file so the length cap and clip count still work.
+        if not dur:
+            dur = _probe_duration(video)
 
     progress(30, "Extracting audio...")
     audio = extract_audio(video, workdir)
