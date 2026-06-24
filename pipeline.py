@@ -763,7 +763,8 @@ _CAM_CORNER = {
 def make_clip(video_path, words, clip, out_dir, index, music_path=None,
               caption_style=DEFAULT_STYLE, music_volume=0.35, broll_path=None,
               split_mode="off", cam_corner="bottom-right", cam_size=CAM_SIZE,
-              logo_path=None, logo_scale=0.16, logo_corner="top-right"):
+              logo_path=None, logo_scale=0.16, logo_corner="top-right",
+              captions=True, jump_cut=True):
     """Cut, remove dead space, crop to 9:16, overlay captions, optional music.
 
     split_mode:
@@ -783,13 +784,18 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
         split_mode = "off"  # no b-roll available
     split = split_mode in ("facecam", "broll")
 
-    caps = _caption_chunks(words, start, end)
+    caps = _caption_chunks(words, start, end) if captions else []
 
-    # Aggressive jump-cut: drop pauses so the clip is fast-paced.
-    silences = _detect_silences(video_path, start, end)
-    keeps = _keep_segments(duration, silences)
-    kept = sum(ke - ks for ks, ke in keeps)
-    tighten = bool(keeps) and kept < duration - 0.3  # only if it removes real time
+    # Aggressive jump-cut: drop pauses so the clip is fast-paced. Skipped in
+    # full-video mode so an already-edited reel keeps its original timing.
+    if jump_cut:
+        silences = _detect_silences(video_path, start, end)
+        keeps = _keep_segments(duration, silences)
+        kept = sum(ke - ks for ks, ke in keeps)
+        tighten = bool(keeps) and kept < duration - 0.3  # only if it removes real time
+    else:
+        keeps = []
+        tighten = False
     if tighten:
         caps = [(_remap(ds, keeps), _remap(de, keeps), t) for ds, de, t in caps]
         caps = [(a, b, t) for a, b, t in caps if b - a > 0.04]
@@ -963,15 +969,24 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
                  caption_style=DEFAULT_STYLE, sarvam_key=None, music_volume=0.35,
                  split_mode="off", cam_corner="bottom-right", cam_size=CAM_SIZE,
                  source_file=None, logo_file=None, logo_scale=0.16,
-                 logo_corner="top-right"):
+                 logo_corner="top-right", clip_mode="moments", captions=True):
     """
     Full run. `progress(pct, message)` is called to report status.
     `language` is "en" (fast local English model), or a code like "te"/"hi"/"ta"
     /"auto". For non-English, Sarvam is used when `sarvam_key` is set (accurate
     Indian languages); otherwise it falls back to the local multilingual model.
     `music` mixes a quiet bed from music/ under the speech, if a track exists.
+
+    `clip_mode`:
+      "moments" — AI finds the best moments and cuts several reels (default).
+      "full"    — keep the whole video as a single reel, no cutting and no
+                  dead-space removal (for already-edited reels you just want
+                  captioned / branded).
+    `captions`: burn animated captions (set False to only crop + add a logo,
+    e.g. for a reel that already has captions baked in).
     Returns list of {file, title, reason, start, end, length}.
     """
+    full_mode = clip_mode == "full"
     progress(2, "Checking video...")
     # Source is either an uploaded file (preferred for the product) or a URL.
     if source_file:
@@ -995,48 +1010,64 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
         if not dur:
             dur = _probe_duration(video)
 
-    progress(30, "Extracting audio...")
-    audio = extract_audio(video, workdir)
-
-    # Non-English always uses Sarvam (accurate). English uses the local model by
-    # default (fast on a GPU Mac), but set PREFER_SARVAM=1 in the cloud — where
-    # there's no GPU — to route English through Sarvam too and stay fast.
-    prefer_sarvam = os.environ.get("PREFER_SARVAM", "").strip().lower() in (
-        "1", "true", "yes")
-    use_sarvam = bool(sarvam_key) and (language != "en" or prefer_sarvam)
-    if use_sarvam:
-        progress(45, "Transcribing with Sarvam (Indian-language engine)...")
-        words = transcribe_sarvam(audio, workdir, language, sarvam_key, progress)
-    else:
-        model_path = MODEL_PATH if language == "en" else MULTILINGUAL_MODEL
-        lang = "en" if language == "en" else language
-        mins = int((dur or 0) / 60)
-        note = "" if lang == "en" else " — non-English local model is slower"
-        est = f"~{mins} min of audio" if mins else "the audio"
-        progress(45, f"Transcribing {est}{note}. This can take a few minutes...")
-        words = transcribe(audio, workdir, model_path, lang)
+    # We need a transcript for caption text, and for AI moment selection.
+    # If the user keeps the whole video AND wants no captions, skip it entirely
+    # (much faster — handy for just slapping a logo on a finished reel).
+    need_transcript = (not full_mode) or captions
+    words = []
+    if need_transcript:
+        progress(30, "Extracting audio...")
+        audio = extract_audio(video, workdir)
+        # Non-English always uses Sarvam (accurate). English uses the local model
+        # by default (fast on a GPU Mac); set PREFER_SARVAM=1 in the cloud — where
+        # there's no GPU — to route English through Sarvam too and stay fast.
+        prefer_sarvam = os.environ.get("PREFER_SARVAM", "").strip().lower() in (
+            "1", "true", "yes")
+        use_sarvam = bool(sarvam_key) and (language != "en" or prefer_sarvam)
+        if use_sarvam:
+            progress(45, "Transcribing with Sarvam (Indian-language engine)...")
+            words = transcribe_sarvam(audio, workdir, language, sarvam_key, progress)
+        else:
+            model_path = MODEL_PATH if language == "en" else MULTILINGUAL_MODEL
+            lang = "en" if language == "en" else language
+            mins = int((dur or 0) / 60)
+            note = "" if lang == "en" else " — non-English local model is slower"
+            est = f"~{mins} min of audio" if mins else "the audio"
+            progress(45, f"Transcribing {est}{note}. This can take a few minutes...")
+            words = transcribe(audio, workdir, model_path, lang)
     phrases = group_phrases(words)
 
-    # Scale the number of clips to the video length (~1 per few minutes).
     total = dur or (words[-1]["end"] if words else 0)
-    max_clips = max(3, min(MAX_CLIPS_CAP, round(total / 60 / CLIP_EVERY_MINUTES)))
 
-    if api_key:
-        progress(68, f"Claude is picking the best moments (up to {max_clips})...")
-        clips = pick_moments_ai(phrases, api_key, max_clips)
-        if not clips:
-            progress(70, "Little speech found — using automatic selection...")
-            clips = pick_moments_heuristic(phrases, max_clips)
+    if full_mode:
+        # Keep the whole video as one reel — no cutting, no moment selection.
+        progress(70, "Editing the whole video...")
+        if not total:
+            total = _probe_duration(video) or 0
+        clips = [{
+            "start": 0.0, "end": round(total, 2),
+            "title": "Full video", "reason": "", "mood": "neutral",
+        }]
     else:
-        progress(70, "Selecting moments (no AI key — using fallback)...")
-        clips = pick_moments_heuristic(phrases, max_clips)
+        # Scale the number of clips to the video length (~1 per few minutes).
+        max_clips = max(3, min(MAX_CLIPS_CAP, round(total / 60 / CLIP_EVERY_MINUTES)))
+        if api_key:
+            progress(68, f"Claude is picking the best moments (up to {max_clips})...")
+            clips = pick_moments_ai(phrases, api_key, max_clips)
+            if not clips:
+                progress(70, "Little speech found — using automatic selection...")
+                clips = pick_moments_heuristic(phrases, max_clips)
+        else:
+            progress(70, "Selecting moments (no AI key — using fallback)...")
+            clips = pick_moments_heuristic(phrases, max_clips)
 
-    if not clips:
-        raise RuntimeError(
-            "This video has almost no spoken content. Clip Reels works by "
-            "finding the best *spoken* moments, so it's built for talking "
-            "videos — podcasts, talks, interviews, vlogs. Try one of those."
-        )
+        if not clips:
+            raise RuntimeError(
+                "This video has almost no spoken content. Auto-clipping finds "
+                "the best *spoken* moments, so it's built for talking videos — "
+                "podcasts, talks, interviews, vlogs. (Tip: choose “Keep the "
+                "whole video” to just caption/brand this one instead.)"
+            )
 
     broll_path = pick_broll() if split_mode == "broll" else None
 
@@ -1052,6 +1083,7 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
             video, words, clip, workdir, i, music_path, caption_style,
             music_volume, broll_path, split_mode, cam_corner, cam_size,
             logo_path=logo_file, logo_scale=logo_scale, logo_corner=logo_corner,
+            captions=captions, jump_cut=(not full_mode),
         )
         # Actual length after dead-space removal (falls back to the cut range).
         actual = _probe_duration(os.path.join(workdir, fname))

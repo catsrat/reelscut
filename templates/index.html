@@ -191,6 +191,12 @@
     </div>
     {% endif %}
 
+    <label class="lbl" for="clipmode" style="margin-top:20px">What should we do with this video?</label>
+    <select id="clipmode">
+      <option value="moments">✂️ Find the best moments — auto-clip into reels</option>
+      <option value="full">🎬 Keep the whole video — just edit it (add captions / logo)</option>
+    </select>
+
     <details class="opts-wrap">
       <summary>Editing options (language, captions, layout, music)</summary>
       <div class="opts">
@@ -211,6 +217,7 @@
                 <option value="small">Small</option>
                 <option value="medium" selected>Medium</option>
                 <option value="large">Large</option>
+                <option value="xlarge">Extra large</option>
               </select>
             </div>
             <div>
@@ -233,6 +240,7 @@
           <option value="ta">Tamil</option>
           <option value="auto">Auto-detect</option>
         </select>
+        <label class="check"><input type="checkbox" id="captions" checked> Add animated captions <span style="color:var(--dim)">(turn off if your video already has captions)</span></label>
         <label class="lbl" for="style">Caption style</label>
         <select id="style">
           <option value="bold_white">Bold White (clean, modern)</option>
@@ -375,6 +383,8 @@ function opts(){
     caption_style: document.getElementById('style').value,
     logo_size: document.getElementById('logosize').value,
     logo_corner: document.getElementById('logocorner').value,
+    clip_mode: document.getElementById('clipmode').value,
+    captions: document.getElementById('captions').checked,
   };
 }
 

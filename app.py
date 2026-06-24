@@ -45,10 +45,16 @@ def _collect_opts(get):
         "cam_corner": (get("cam_corner") or "bottom-right").strip(),
         "cam_size": {"small": 0.18, "medium": 0.28, "large": 0.4}.get(
             (get("cam_size") or "medium").strip(), 0.28),
-        "logo_scale": {"small": 0.10, "medium": 0.16, "large": 0.24}.get(
-            (get("logo_size") or "medium").strip(), 0.16),
+        "logo_scale": {"small": 0.12, "medium": 0.20, "large": 0.32,
+                       "xlarge": 0.45}.get(
+            (get("logo_size") or "medium").strip(), 0.20),
         "logo_corner": (get("logo_corner") or "top-right").strip(),
         "logo_file": None,  # filled in from the uploaded logo, if any
+        # "moments" = AI auto-clips best moments; "full" = keep the whole video.
+        "clip_mode": (get("clip_mode") or "moments").strip(),
+        # captions default ON; the form sends "true"/"false".
+        "captions": (str(get("captions")).lower() in ("true", "1", "on", "yes"))
+        if get("captions") is not None else True,
     }
 
 
@@ -91,6 +97,8 @@ def _worker(job_id, opts):
             logo_file=opts.get("logo_file"),
             logo_scale=opts.get("logo_scale", 0.16),
             logo_corner=opts.get("logo_corner", "top-right"),
+            clip_mode=opts.get("clip_mode", "moments"),
+            captions=opts.get("captions", True),
         )
         # If R2 is configured, upload clips and attach durable URLs.
         if storage.enabled():
