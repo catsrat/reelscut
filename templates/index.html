@@ -94,6 +94,29 @@
   .check{display:flex; align-items:center; gap:9px; margin:18px 0 4px; font-size:14px; color:var(--text);}
   .check input{width:18px; height:18px; accent-color:var(--accent);}
 
+  /* campaign rules */
+  .rules-sec{border:1px solid rgba(213,0,28,.35); border-radius:14px; padding:16px;
+       margin-top:18px; background:radial-gradient(circle at 0% 0%, rgba(213,0,28,.08), transparent 70%);}
+  .rules-head{font-weight:800; font-size:15px; margin-bottom:10px;}
+  .rules-head span{color:var(--dim); font-weight:400; font-size:13px;}
+  #rules{width:100%; padding:13px 14px; font-size:14px; border-radius:12px; resize:vertical;
+       border:1px solid var(--line); background:rgba(0,0,0,.35); color:var(--text);
+       font-family:inherit; line-height:1.5;}
+  #rules:focus{outline:none; border-color:var(--accent2);}
+  .rules-hint{font-size:12px; color:var(--dim); margin:8px 0 0;}
+
+  /* compliance report */
+  .comp{border:1px solid rgba(95,227,154,.35); border-radius:16px; padding:20px;
+       background:rgba(95,227,154,.05); margin-bottom:18px;}
+  .comp h3{margin:0 0 12px; font-size:18px;}
+  .comp .sub{font-weight:700; font-size:14px; margin:14px 0 6px;}
+  .comp ul{margin:0; padding-left:20px;}
+  .comp li{font-size:14px; margin:4px 0; color:var(--text);}
+  .comp .cap{background:rgba(0,0,0,.4); border:1px solid var(--line); border-radius:10px;
+       padding:12px; font-size:14px; white-space:pre-wrap; margin-top:6px; line-height:1.5;}
+  .comp .copy{margin-top:8px; font-size:13px; font-weight:700; color:#fff; cursor:pointer;
+       background:var(--accent); border:0; padding:8px 14px; border-radius:9px;}
+
   /* logo / watermark */
   .logo-sec{border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:6px;
        background:rgba(255,255,255,.02);}
@@ -190,6 +213,12 @@
       </p>
     </div>
     {% endif %}
+
+    <div class="rules-sec">
+      <div class="rules-head">📋 Campaign rules <span>(optional — for Whop / paid clipping)</span></div>
+      <textarea id="rules" rows="4" placeholder="Paste the campaign's rules / Google Doc here. Our AI reads them and builds your clip to match — correct length, captions, hashtags — and gives you a payment-safe checklist so you don't miss the payout."></textarea>
+      <p class="rules-hint">✅ The AI auto-applies the rules and hands you a ready-to-paste caption + checklist.</p>
+    </div>
 
     <label class="lbl" for="clipmode" style="margin-top:20px">What should we do with this video?</label>
     <select id="clipmode">
@@ -395,6 +424,7 @@ function opts(){
     punchy: document.getElementById('punchy').checked,
     punch_zoom: document.getElementById('punchzoom').checked,
     color_pop: document.getElementById('colorpop').checked,
+    rules: document.getElementById('rules').value,
   };
 }
 
@@ -447,16 +477,41 @@ async function poll(jobId){
 
   if (job.status === 'error') { fail(job.message); return; }
   if (job.status === 'done') {
-    render(jobId, job.clips);
+    render(jobId, job.clips, job.compliance);
     go.disabled = false;
     return;
   }
   setTimeout(() => poll(jobId), 1500);
 }
 
-function render(jobId, clips){
-  if (!clips.length){ results.innerHTML = '<div class="card">No clips found.</div>'; return; }
-  results.innerHTML = '<div class="card"><div class="rhead">🎉 '+clips.length+' reels ready</div></div>';
+function renderCompliance(c){
+  if (!c) return '';
+  const auto = (c.auto_handled||[]).map(x => '<li>✅ '+escapeHtml(x)+'</li>').join('');
+  const manual = (c.manual_todo||[]).map(x => '<li>⚠️ '+escapeHtml(x)+'</li>').join('');
+  const tags = [].concat(c.hashtags||[], c.mentions||[]).map(escapeHtml).join(' ');
+  let html = '<div class="comp"><h3>💸 Payment-safe checklist</h3>';
+  if (auto) html += '<div class="sub">Done for you</div><ul>'+auto+'</ul>';
+  if (manual) html += '<div class="sub">⚠️ You still need to do</div><ul>'+manual+'</ul>';
+  if (c.post_caption){
+    html += '<div class="sub">📋 Ready-to-paste caption</div>'+
+            '<div class="cap" id="capText">'+escapeHtml(c.post_caption)+'</div>'+
+            '<button class="copy" onclick="copyCap()">Copy caption</button>';
+  } else if (tags){
+    html += '<div class="sub">📋 Required tags</div><div class="cap" id="capText">'+tags+'</div>'+
+            '<button class="copy" onclick="copyCap()">Copy tags</button>';
+  }
+  html += '</div>';
+  return html;
+}
+function copyCap(){
+  const el = document.getElementById('capText');
+  if (el) navigator.clipboard.writeText(el.textContent);
+}
+
+function render(jobId, clips, compliance){
+  const comp = renderCompliance(compliance);
+  if (!clips.length){ results.innerHTML = comp + '<div class="card">No clips found.</div>'; return; }
+  results.innerHTML = comp + '<div class="card"><div class="rhead">🎉 '+clips.length+' reels ready</div></div>';
   for (const c of clips){
     const src = c.url || ('/clip/'+jobId+'/'+c.file);
     const div = document.createElement('div');

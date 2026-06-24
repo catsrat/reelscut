@@ -59,6 +59,38 @@ def _collect_opts(get):
         "punchy": str(get("punchy")).lower() in ("true", "1", "on", "yes"),
         "punch_zoom": str(get("punch_zoom")).lower() in ("true", "1", "on", "yes"),
         "color_pop": str(get("color_pop")).lower() in ("true", "1", "on", "yes"),
+        # Optional pasted clipping-campaign rules (Whop / Google Doc).
+        "rules": (get("rules") or "").strip(),
+    }
+
+
+def _apply_rules(req, opts):
+    """Auto-apply parsed campaign requirements onto the editing options, and
+    return the 'payment-safe' report (checklist + ready-to-paste caption)."""
+    if req.get("captions_required"):
+        opts["captions"] = True
+    lang = (req.get("language") or "").strip().lower()
+    if lang in ("en", "te", "hi", "ta"):
+        opts["language"] = lang
+    mn = req.get("min_length_sec") or 0
+    mx = req.get("max_length_sec") or 0
+    if mn:
+        opts["min_clip"] = float(mn)
+    if mx:
+        opts["max_clip"] = float(mx)
+
+    auto = list(req.get("auto_handled") or [])
+    manual = list(req.get("manual_todo") or [])
+    # If the campaign needs a watermark but none was uploaded, it's on the user.
+    if req.get("logo_required") and not opts.get("logo_file"):
+        manual.insert(0, "Upload your logo/watermark — this campaign requires it "
+                         "(add it in “Your logo / watermark”).")
+    return {
+        "post_caption": req.get("post_caption") or "",
+        "hashtags": req.get("hashtags") or [],
+        "mentions": req.get("mentions") or [],
+        "auto_handled": auto,
+        "manual_todo": manual,
     }
 
 
@@ -91,6 +123,18 @@ def _worker(job_id, opts):
         api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
         job["ai"] = bool(api_key)
         sarvam_key = os.environ.get("SARVAM_API_KEY", "").strip()
+
+        # Read clipping-campaign rules first and auto-apply them, so the clip is
+        # built compliant and we can hand back a payment-safe checklist.
+        rules_text = opts.get("rules") or ""
+        if rules_text and api_key:
+            progress(3, "Reading the campaign rules...")
+            try:
+                req = pipeline.parse_campaign_rules(rules_text, api_key)
+                job["compliance"] = _apply_rules(req, opts)
+            except Exception:
+                pass  # rules parsing is best-effort; never block the clip
+
         results = pipeline.run_pipeline(
             url, workdir, api_key, progress,
             language=opts["language"], music=opts["music"],
@@ -106,6 +150,8 @@ def _worker(job_id, opts):
             punchy=opts.get("punchy", False),
             punch_zoom=opts.get("punch_zoom", False),
             color_pop=opts.get("color_pop", False),
+            min_clip=opts.get("min_clip"),
+            max_clip=opts.get("max_clip"),
         )
         # If R2 is configured, upload clips and attach durable URLs.
         if storage.enabled():

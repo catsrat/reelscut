@@ -413,13 +413,34 @@ def _transcript_for_prompt(segments):
     return "\n".join(lines)
 
 
-def pick_moments_ai(segments, api_key, max_clips=5):
-    """Ask Claude to choose the most engaging moments. Returns list of clips."""
+def pick_moments_ai(segments, api_key, max_clips=5, min_clip=None, max_clip=None):
+    """Ask Claude to choose the most engaging moments. Returns list of clips.
+
+    min_clip/max_clip (seconds) hard-bound the length when a clipping campaign
+    requires it — the clips MUST then fall within those bounds to get paid."""
     import anthropic
 
     client = anthropic.Anthropic(api_key=api_key)
     transcript = _transcript_for_prompt(segments)
     total = segments[-1]["end"]
+
+    lo = int(min_clip) if min_clip else MIN_CLIP
+    hi = int(max_clip) if max_clip else MAX_CLIP
+    if min_clip or max_clip:
+        length_rule = (
+            f"LENGTH — STRICT CAMPAIGN REQUIREMENT (the clipper is NOT PAID if a "
+            f"clip falls outside this): every clip MUST be at least {lo} seconds "
+            f"and at most {hi} seconds. Choose start/end so each clip is within "
+            f"{lo}-{hi}s while still running hook -> full payoff.\n\n"
+        )
+    else:
+        length_rule = (
+            f"LENGTH — let the content decide, do not force a number:\n"
+            f"- Aim for {lo}-60 seconds; go up to {hi} only if needed to "
+            "land the full payoff. Never pad, and never cut a thought short just to "
+            "hit a target. A complete 55-second story beats a truncated 25-second one.\n"
+            "- Choose start/end so the clip runs from the hook through the payoff.\n\n"
+        )
 
     system = (
         "You are a world-class short-form video editor and viral content "
@@ -437,11 +458,7 @@ def pick_moments_ai(segments, api_key, max_clips=5):
         "FAILED clip.\n"
         "- SELF-CONTAINED: it makes sense on its own, without the rest of the video.\n"
         "- WORTH SHARING: emotional, surprising, funny, controversial, or genuinely useful.\n\n"
-        "LENGTH — let the content decide, do not force a number:\n"
-        f"- Aim for {MIN_CLIP}-60 seconds; go up to {MAX_CLIP} only if needed to "
-        "land the full payoff. Never pad, and never cut a thought short just to "
-        "hit a target. A complete 55-second story beats a truncated 25-second one.\n"
-        "- Choose start/end so the clip runs from the hook through the payoff.\n\n"
+        + length_rule +
         "FOR EACH CLIP:\n"
         "- start/end: real timestamps from the transcript, start < end.\n"
         "- title: punchy, scroll-stopping, max 60 chars, in the video's language.\n"
@@ -488,7 +505,7 @@ def pick_moments_ai(segments, api_key, max_clips=5):
     )
     text = next(b.text for b in resp.content if b.type == "text")
     clips = json.loads(text).get("clips", [])
-    return _sanitize_clips(clips, segments)
+    return _sanitize_clips(clips, segments, max_clip=max_clip)
 
 
 def pick_moments_heuristic(segments, max_clips=5):
@@ -517,17 +534,84 @@ def pick_moments_heuristic(segments, max_clips=5):
     return _sanitize_clips(clips, segments)
 
 
-def _sanitize_clips(clips, segments):
+def parse_campaign_rules(text, api_key):
+    """Read a clipping campaign's pasted rules / Google-Doc terms and return the
+    structured requirements, so the tool can auto-build a compliant clip and give
+    the clipper a 'payment-safe' checklist. Returns a dict (see schema)."""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+    system = (
+        "You help social-media 'clippers' who get PAID through clipping campaigns "
+        "(e.g. on Whop). You are given a campaign's rules / terms (pasted from a "
+        "Google Doc). Extract the requirements precisely so a video tool can "
+        "auto-build a COMPLIANT clip and the clipper never misses a payment.\n\n"
+        "Return:\n"
+        "- min_length_sec / max_length_sec: required clip length in seconds, or 0 "
+        "if not specified.\n"
+        "- language: spoken/caption language if specified — one of en, te, hi, ta "
+        "— else \"\".\n"
+        "- captions_required: true if captions/subtitles are required.\n"
+        "- logo_required: true if a watermark / logo / handle overlay is required.\n"
+        "- hashtags: every required hashtag, each starting with #.\n"
+        "- mentions: every required @mention / handle to tag, each starting with @.\n"
+        "- post_caption: a ready-to-paste caption/description for the post that "
+        "obeys the caption rules and includes the required hashtags and mentions.\n"
+        "- auto_handled: short bullets for each rule THIS VIDEO TOOL handles "
+        "automatically (e.g. '9:16 vertical', 'clip length 30-60s', 'captions on', "
+        "'logo overlay').\n"
+        "- manual_todo: short bullets for rules only the clipper can do (where/when "
+        "to post, which account/platform, tag in bio, follower minimums, deadlines, "
+        "submitting the link on Whop, etc.).\n\n"
+        "Be faithful — never invent requirements. If something is not stated, leave "
+        "it 0 / \"\" / empty."
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "min_length_sec": {"type": "number"},
+            "max_length_sec": {"type": "number"},
+            "language": {"type": "string"},
+            "captions_required": {"type": "boolean"},
+            "logo_required": {"type": "boolean"},
+            "hashtags": {"type": "array", "items": {"type": "string"}},
+            "mentions": {"type": "array", "items": {"type": "string"}},
+            "post_caption": {"type": "string"},
+            "auto_handled": {"type": "array", "items": {"type": "string"}},
+            "manual_todo": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [
+            "min_length_sec", "max_length_sec", "language", "captions_required",
+            "logo_required", "hashtags", "mentions", "post_caption",
+            "auto_handled", "manual_todo",
+        ],
+        "additionalProperties": False,
+    }
+    resp = client.messages.create(
+        model="claude-opus-4-8",
+        max_tokens=4000,
+        thinking={"type": "adaptive"},
+        system=system,
+        messages=[{"role": "user", "content": f"Campaign rules:\n\n{text}"}],
+        output_config={"format": {"type": "json_schema", "schema": schema}},
+    )
+    out = next(b.text for b in resp.content if b.type == "text")
+    return json.loads(out)
+
+
+def _sanitize_clips(clips, segments, max_clip=None):
     total = segments[-1]["end"]
+    hard_max = float(max_clip) if max_clip else MAX_CLIP
     clean = []
     for c in clips:
         start = max(0.0, float(c.get("start", 0)))
         end = min(total, float(c.get("end", 0)))
         if end <= start:
             continue
-        # Clamp absurd lengths.
-        if end - start > MAX_CLIP * 1.5:
-            end = start + MAX_CLIP
+        # Clamp absurd lengths (or the campaign's hard max).
+        cap = hard_max if max_clip else MAX_CLIP * 1.5
+        if end - start > cap:
+            end = start + hard_max
         mood = (c.get("mood") or "neutral").strip().lower()
         if mood not in MOODS:
             mood = "neutral"
@@ -992,7 +1076,8 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
                  split_mode="off", cam_corner="bottom-right", cam_size=CAM_SIZE,
                  source_file=None, logo_file=None, logo_scale=0.16,
                  logo_corner="top-right", clip_mode="moments", captions=True,
-                 punchy=False, punch_zoom=False, color_pop=False):
+                 punchy=False, punch_zoom=False, color_pop=False,
+                 min_clip=None, max_clip=None):
     """
     Full run. `progress(pct, message)` is called to report status.
     `language` is "en" (fast local English model), or a code like "te"/"hi"/"ta"
@@ -1076,7 +1161,7 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
         max_clips = max(3, min(MAX_CLIPS_CAP, round(total / 60 / CLIP_EVERY_MINUTES)))
         if api_key:
             progress(68, f"Claude is picking the best moments (up to {max_clips})...")
-            clips = pick_moments_ai(phrases, api_key, max_clips)
+            clips = pick_moments_ai(phrases, api_key, max_clips, min_clip, max_clip)
             if not clips:
                 progress(70, "Little speech found — using automatic selection...")
                 clips = pick_moments_heuristic(phrases, max_clips)
