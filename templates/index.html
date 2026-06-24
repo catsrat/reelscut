@@ -448,16 +448,20 @@ go.onclick = async () => {
     if (mode === 'upload') {
       const file = fileInput.files[0];
       if (!file) { fail('Choose a video file first.'); return; }
-      msg.textContent = 'Uploading file...';
       fd.append('file', file);
-      res = await (await fetch('/upload', {method:'POST', body: fd})).json();
+      res = await postWithProgress('/upload', fd);
     } else {
       const url = urlInput.value.trim();
       if (!url) { fail('Paste a Google Drive link first.'); return; }
       fd.append('url', url);
       res = await (await fetch('/process', {method:'POST', body: fd})).json();
     }
-  } catch (e) { fail('Network error.'); return; }
+  } catch (e) {
+    fail(e && e.message === 'too_big'
+      ? 'Upload failed — the file may be too large to upload here. Put it in Google Drive (share “Anyone with the link”) and paste the link instead — no upload needed.'
+      : 'Upload error. Try a smaller file, or paste a Google Drive link instead.');
+    return;
+  }
 
   if (res.error) { fail(res.error); return; }
   poll(res.job_id);
@@ -466,6 +470,34 @@ go.onclick = async () => {
 function fail(text){
   msg.innerHTML = '<span class="err">' + text + '</span>';
   go.disabled = false;
+}
+
+// Upload via XHR so we can show a real progress % (fetch can't) and fail
+// cleanly instead of hanging on a too-large file.
+function postWithProgress(path, fd){
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', path);
+    xhr.timeout = 0;
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable){
+        const pc = Math.round(e.loaded / e.total * 100);
+        fill.style.width = pc + '%';
+        pctEl.textContent = pc + '%';
+        msg.textContent = pc < 100 ? 'Uploading file... ' + pc + '%'
+                                   : 'Upload done — starting...';
+      }
+    };
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (_) {}
+      if (xhr.status >= 400 && !(data && data.error)) { reject(new Error('too_big')); return; }
+      resolve(data || {});
+    };
+    xhr.onerror = () => reject(new Error('too_big'));
+    xhr.ontimeout = () => reject(new Error('too_big'));
+    xhr.send(fd);
+  });
 }
 
 async function poll(jobId){
