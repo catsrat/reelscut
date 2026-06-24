@@ -94,6 +94,23 @@
   .check{display:flex; align-items:center; gap:9px; margin:18px 0 4px; font-size:14px; color:var(--text);}
   .check input{width:18px; height:18px; accent-color:var(--accent);}
 
+  /* logo / watermark */
+  .logo-sec{border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:6px;
+       background:rgba(255,255,255,.02);}
+  .logo-head{font-weight:700; font-size:15px; margin-bottom:12px;}
+  .logo-head span{color:var(--dim); font-weight:400; font-size:13px;}
+  .logo-pick{display:flex; align-items:center; gap:12px; cursor:pointer; padding:12px 14px;
+       border:1px dashed rgba(255,255,255,.18); border-radius:12px; color:var(--dim);
+       font-size:14px; transition:.2s;}
+  .logo-pick:hover{border-color:var(--accent2); color:var(--text);}
+  .logo-pick.set{border-style:solid; border-color:rgba(95,227,154,.5); color:var(--text);}
+  .logo-prev{display:none; width:46px; height:46px; object-fit:contain; border-radius:8px;
+       background:rgba(0,0,0,.5); padding:4px;}
+  .logo-pick.set .logo-prev{display:block;}
+  .logo-clear{margin-left:auto; cursor:pointer; font-size:16px;}
+  .logo-controls{display:flex; gap:14px; margin-top:6px;}
+  .logo-controls>div{flex:1;}
+
   .go{margin-top:22px; width:100%; padding:17px; font-size:17px; font-weight:800;
        border:0; border-radius:14px; cursor:pointer; color:#fff; letter-spacing:.01em;
        background:linear-gradient(100deg,var(--accent),var(--accent2));
@@ -177,6 +194,37 @@
     <details class="opts-wrap">
       <summary>Editing options (language, captions, layout, music)</summary>
       <div class="opts">
+        <div class="logo-sec">
+          <div class="logo-head">🎨 Your logo / watermark <span>(optional)</span></div>
+          <div class="logo-row">
+            <label class="logo-pick" id="logoPick">
+              <input id="logo" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+              <img id="logoPrev" class="logo-prev" alt="">
+              <span id="logoPickText">+ Add logo (PNG with transparent background works best)</span>
+              <span class="logo-clear" id="logoClear" title="Remove" style="display:none">✕</span>
+            </label>
+          </div>
+          <div class="logo-controls">
+            <div>
+              <label class="lbl" for="logosize">Logo size</label>
+              <select id="logosize">
+                <option value="small">Small</option>
+                <option value="medium" selected>Medium</option>
+                <option value="large">Large</option>
+              </select>
+            </div>
+            <div>
+              <label class="lbl" for="logocorner">Position on the video</label>
+              <select id="logocorner">
+                <option value="top-right" selected>Top-right</option>
+                <option value="top-left">Top-left</option>
+                <option value="bottom-right">Bottom-right</option>
+                <option value="bottom-left">Bottom-left</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
         <label class="lbl" for="lang">Spoken language</label>
         <select id="lang">
           <option value="en">English (fastest)</option>
@@ -277,6 +325,29 @@ drop.addEventListener('drop', e => {
   if (e.dataTransfer.files.length){ fileInput.files = e.dataTransfer.files; showFile(); }
 });
 
+// ---- Logo picker ----
+const logoInput = document.getElementById('logo');
+const logoPick = document.getElementById('logoPick');
+const logoPrev = document.getElementById('logoPrev');
+const logoPickText = document.getElementById('logoPickText');
+const logoClear = document.getElementById('logoClear');
+logoInput.addEventListener('change', () => {
+  const f = logoInput.files[0];
+  if (f){
+    logoPrev.src = URL.createObjectURL(f);
+    logoPickText.textContent = f.name;
+    logoClear.style.display = 'inline';
+    logoPick.classList.add('set');
+  } else { resetLogo(); }
+});
+logoClear.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); logoInput.value=''; resetLogo(); });
+function resetLogo(){
+  logoPrev.src = '';
+  logoPickText.textContent = '+ Add logo (PNG with transparent background works best)';
+  logoClear.style.display = 'none';
+  logoPick.classList.remove('set');
+}
+
 // ---- Tab switching ----
 let mode = 'upload';
 const tabUpload = document.getElementById('tab-upload');
@@ -302,6 +373,8 @@ function opts(){
     cam_corner: document.getElementById('camcorner').value,
     cam_size: document.getElementById('camsize').value,
     caption_style: document.getElementById('style').value,
+    logo_size: document.getElementById('logosize').value,
+    logo_corner: document.getElementById('logocorner').value,
   };
 }
 
@@ -316,22 +389,23 @@ go.onclick = async () => {
 
   let res;
   try {
+    const fd = new FormData();
+    const o = opts();
+    for (const k in o) fd.append(k, o[k]);
+    const logoFile = logoInput.files[0];
+    if (logoFile) fd.append('logo', logoFile);
+
     if (mode === 'upload') {
       const file = fileInput.files[0];
       if (!file) { fail('Choose a video file first.'); return; }
       msg.textContent = 'Uploading file...';
-      const fd = new FormData();
       fd.append('file', file);
-      const o = opts();
-      for (const k in o) fd.append(k, o[k]);
       res = await (await fetch('/upload', {method:'POST', body: fd})).json();
     } else {
       const url = urlInput.value.trim();
-      if (!url) { fail('Paste a link first.'); return; }
-      res = await (await fetch('/process', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({url, ...opts()})
-      })).json();
+      if (!url) { fail('Paste a Google Drive link first.'); return; }
+      fd.append('url', url);
+      res = await (await fetch('/process', {method:'POST', body: fd})).json();
     }
   } catch (e) { fail('Network error.'); return; }
 

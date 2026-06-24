@@ -762,7 +762,8 @@ _CAM_CORNER = {
 
 def make_clip(video_path, words, clip, out_dir, index, music_path=None,
               caption_style=DEFAULT_STYLE, music_volume=0.35, broll_path=None,
-              split_mode="off", cam_corner="bottom-right", cam_size=CAM_SIZE):
+              split_mode="off", cam_corner="bottom-right", cam_size=CAM_SIZE,
+              logo_path=None, logo_scale=0.16, logo_corner="top-right"):
     """Cut, remove dead space, crop to 9:16, overlay captions, optional music.
 
     split_mode:
@@ -770,6 +771,9 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
       "facecam"  — single source split into game (top) + cropped facecam (bottom).
       "broll"    — speaker on top, looping b-roll (broll_path) on the bottom.
     Captions sit on the seam in split modes.
+
+    logo_path: optional watermark image overlaid in a corner on every clip,
+    scaled to `logo_scale` of the frame width and kept clear of the captions.
     """
     start, end = clip["start"], clip["end"]
     out_name = f"clip_{index:02d}.mp4"
@@ -811,6 +815,11 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     if music_path:
         inputs += ["-stream_loop", "-1", "-i", os.path.abspath(music_path)]
         music_idx = nxt_idx
+        nxt_idx += 1
+    logo_idx = None
+    if logo_path and os.path.exists(logo_path):
+        inputs += ["-i", os.path.abspath(logo_path)]
+        logo_idx = nxt_idx
         nxt_idx += 1
 
     keep_expr = "+".join(f"between(t,{ks:.3f},{ke:.3f})" for ks, ke in keeps)
@@ -859,6 +868,21 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
             f"enable='between(t,{rs:.2f},{re_:.2f})'[{nxt}]"
         )
         last = nxt
+
+    # Logo/watermark: scale to a fraction of the width, sit in a padded corner
+    # on top of everything (always visible), clear of the centred captions.
+    if logo_idx is not None:
+        lw = max(2, int(W * float(logo_scale)))
+        pad = int(W * 0.045)
+        corner = {
+            "top-left":     f"{pad}:{pad}",
+            "top-right":    f"W-w-{pad}:{pad}",
+            "bottom-left":  f"{pad}:H-h-{pad}",
+            "bottom-right": f"W-w-{pad}:H-h-{pad}",
+        }.get(logo_corner, f"W-w-{pad}:{pad}")
+        parts.append(f"[{logo_idx}:v]scale={lw}:-2[lg]")
+        parts.append(f"[{last}][lg]overlay={corner}[vlogo]")
+        last = "vlogo"
 
     # Audio: tightened to match the cuts, plus an optional quiet music bed.
     if tighten:
@@ -938,7 +962,8 @@ def music_for_mood(mood):
 def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
                  caption_style=DEFAULT_STYLE, sarvam_key=None, music_volume=0.35,
                  split_mode="off", cam_corner="bottom-right", cam_size=CAM_SIZE,
-                 source_file=None):
+                 source_file=None, logo_file=None, logo_scale=0.16,
+                 logo_corner="top-right"):
     """
     Full run. `progress(pct, message)` is called to report status.
     `language` is "en" (fast local English model), or a code like "te"/"hi"/"ta"
@@ -1026,6 +1051,7 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
         fname = make_clip(
             video, words, clip, workdir, i, music_path, caption_style,
             music_volume, broll_path, split_mode, cam_corner, cam_size,
+            logo_path=logo_file, logo_scale=logo_scale, logo_corner=logo_corner,
         )
         # Actual length after dead-space removal (falls back to the cut range).
         actual = _probe_duration(os.path.join(workdir, fname))

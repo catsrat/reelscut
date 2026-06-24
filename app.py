@@ -45,7 +45,22 @@ def _collect_opts(get):
         "cam_corner": (get("cam_corner") or "bottom-right").strip(),
         "cam_size": {"small": 0.18, "medium": 0.28, "large": 0.4}.get(
             (get("cam_size") or "medium").strip(), 0.28),
+        "logo_scale": {"small": 0.10, "medium": 0.16, "large": 0.24}.get(
+            (get("logo_size") or "medium").strip(), 0.16),
+        "logo_corner": (get("logo_corner") or "top-right").strip(),
+        "logo_file": None,  # filled in from the uploaded logo, if any
     }
+
+
+def _attach_logo(workdir, opts):
+    """Save an optional uploaded logo/watermark into the job dir."""
+    logo = request.files.get("logo")
+    if logo and logo.filename:
+        name = secure_filename(logo.filename) or "logo.png"
+        ext = os.path.splitext(name)[1].lower() or ".png"
+        path = os.path.join(workdir, "logo" + ext)
+        logo.save(path)
+        opts["logo_file"] = path
 
 
 def _worker(job_id, opts):
@@ -73,6 +88,9 @@ def _worker(job_id, opts):
             music_volume=opts["music_volume"], split_mode=opts["split_mode"],
             cam_corner=opts["cam_corner"], cam_size=opts["cam_size"],
             source_file=source_file,
+            logo_file=opts.get("logo_file"),
+            logo_scale=opts.get("logo_scale", 0.16),
+            logo_corner=opts.get("logo_corner", "top-right"),
         )
         # If R2 is configured, upload clips and attach durable URLs.
         if storage.enabled():
@@ -91,16 +109,6 @@ def _worker(job_id, opts):
 
 def _busy():
     return any(j["status"] == "running" for j in JOBS.values())
-
-
-def _start_job(opts):
-    job_id = uuid.uuid4().hex[:12]
-    JOBS[job_id] = {
-        "status": "running", "progress": 0, "message": "Starting...",
-        "title": "", "clips": [], "ai": False,
-    }
-    threading.Thread(target=_worker, args=(job_id, opts), daemon=True).start()
-    return job_id
 
 
 @app.route("/")
@@ -129,18 +137,29 @@ def index():
 
 @app.route("/process", methods=["POST"])
 def process():
-    """Process a YouTube link (JSON body)."""
-    data = request.json or {}
-    url = (data.get("url") or "").strip()
+    """Process a Google Drive / video link (multipart form, optional logo)."""
+    url = (request.form.get("url") or "").strip()
     if not url:
-        return jsonify({"error": "Please paste a YouTube link."}), 400
+        return jsonify({"error": "Please paste a Google Drive link."}), 400
     if _busy():
         return jsonify({"error": "A video is already being processed. "
                                  "Please wait for it to finish."}), 409
-    opts = _collect_opts(data.get)
+
+    job_id = uuid.uuid4().hex[:12]
+    workdir = os.path.join(JOBS_DIR, job_id)
+    os.makedirs(workdir, exist_ok=True)
+
+    opts = _collect_opts(request.form.get)
     opts["url"] = url
     opts["source_file"] = None
-    return jsonify({"job_id": _start_job(opts)})
+    _attach_logo(workdir, opts)
+
+    JOBS[job_id] = {
+        "status": "running", "progress": 0, "message": "Starting...",
+        "title": "", "clips": [], "ai": False,
+    }
+    threading.Thread(target=_worker, args=(job_id, opts), daemon=True).start()
+    return jsonify({"job_id": job_id})
 
 
 @app.route("/upload", methods=["POST"])
@@ -165,6 +184,7 @@ def upload():
     opts["url"] = None
     opts["source_file"] = saved
     opts["title"] = os.path.splitext(name)[0]
+    _attach_logo(workdir, opts)
 
     # Reuse the job_id/workdir we already created for the saved file.
     JOBS[job_id] = {
