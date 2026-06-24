@@ -114,6 +114,9 @@ def _worker(job_id, opts):
     def progress(pct, message):
         job["progress"] = pct
         job["message"] = message
+        print(f"[{job_id}] {pct}% — {message}", flush=True)
+
+    print(f"[{job_id}] worker started (source={'upload' if opts.get('source_file') else 'link'})", flush=True)
 
     try:
         source_file = opts.get("source_file")
@@ -167,6 +170,9 @@ def _worker(job_id, opts):
     except Exception as e:  # surface the real error to the UI
         job["status"] = "error"
         job["message"] = str(e)
+        import traceback
+        print(f"[{job_id}] ERROR: {e}", flush=True)
+        traceback.print_exc()
 
 
 def _busy():

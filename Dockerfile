@@ -42,4 +42,4 @@ ENV PORT=7860
 EXPOSE 7860
 
 # Shell form so $PORT expands. Single worker: job state is in memory, one at a time.
-CMD gunicorn -w 1 --threads 8 --timeout 0 -b 0.0.0.0:$PORT app:app
+CMD gunicorn -w 1 --threads 8 --timeout 0 --access-logfile - -b 0.0.0.0:$PORT app:app
