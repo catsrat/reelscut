@@ -10,6 +10,7 @@ using a simple fallback selector.
 """
 
 import os
+import re
 import shutil
 import threading
 import uuid
@@ -254,6 +255,69 @@ def upload():
     }
     threading.Thread(target=_worker, args=(job_id, opts), daemon=True).start()
     return jsonify({"job_id": job_id})
+
+
+# ---- Chunked upload: send the file in small pieces so big files get past the
+# host's single-request size limit (a 210MB upload stalls as one request). ----
+
+@app.route("/upload_start", methods=["POST"])
+def upload_start():
+    uid = uuid.uuid4().hex[:12]
+    os.makedirs(os.path.join(JOBS_DIR, uid), exist_ok=True)
+    return jsonify({"upload_id": uid})
+
+
+def _safe_uid(uid):
+    return uid if re.fullmatch(r"[a-f0-9]{12}", uid or "") else None
+
+
+@app.route("/upload_chunk", methods=["POST"])
+def upload_chunk():
+    uid = _safe_uid(request.form.get("upload_id"))
+    if not uid:
+        return jsonify({"error": "bad upload id"}), 400
+    workdir = os.path.join(JOBS_DIR, uid)
+    if not os.path.isdir(workdir):
+        return jsonify({"error": "unknown upload"}), 404
+    chunk = request.files.get("chunk")
+    if not chunk:
+        return jsonify({"error": "no chunk"}), 400
+    # Chunks arrive in order (client awaits each) -> append.
+    with open(os.path.join(workdir, "upload.part"), "ab") as f:
+        f.write(chunk.read())
+    return jsonify({"ok": True})
+
+
+@app.route("/upload_done", methods=["POST"])
+def upload_done():
+    uid = _safe_uid(request.form.get("upload_id"))
+    if not uid:
+        return jsonify({"error": "bad upload id"}), 400
+    workdir = os.path.join(JOBS_DIR, uid)
+    part = os.path.join(workdir, "upload.part")
+    if not os.path.exists(part):
+        return jsonify({"error": "Upload not found — please try again."}), 400
+    if _busy():
+        return jsonify({"error": "A video is already being processed. "
+                                 "Please wait for it to finish."}), 409
+
+    name = secure_filename(request.form.get("filename") or "") or "upload.mp4"
+    ext = os.path.splitext(name)[1].lower() or ".mp4"
+    saved = os.path.join(workdir, "source" + ext)
+    os.replace(part, saved)
+
+    opts = _collect_opts(request.form.get)
+    opts["url"] = None
+    opts["source_file"] = saved
+    opts["title"] = os.path.splitext(name)[0]
+    _attach_logo(workdir, opts)
+
+    JOBS[uid] = {
+        "status": "running", "progress": 0, "message": "Starting...",
+        "title": opts["title"], "clips": [], "ai": False,
+    }
+    threading.Thread(target=_worker, args=(uid, opts), daemon=True).start()
+    return jsonify({"job_id": uid})
 
 
 @app.route("/status/<job_id>")

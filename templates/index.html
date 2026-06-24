@@ -439,27 +439,23 @@ go.onclick = async () => {
 
   let res;
   try {
-    const fd = new FormData();
-    const o = opts();
-    for (const k in o) fd.append(k, o[k]);
     const logoFile = logoInput.files[0];
-    if (logoFile) fd.append('logo', logoFile);
-
     if (mode === 'upload') {
       const file = fileInput.files[0];
       if (!file) { fail('Choose a video file first.'); return; }
-      fd.append('file', file);
-      res = await postWithProgress('/upload', fd);
+      res = await chunkedUpload(file, opts(), logoFile);
     } else {
       const url = urlInput.value.trim();
       if (!url) { fail('Paste a Google Drive link first.'); return; }
+      const fd = new FormData();
+      const o = opts();
+      for (const k in o) fd.append(k, o[k]);
+      if (logoFile) fd.append('logo', logoFile);
       fd.append('url', url);
       res = await (await fetch('/process', {method:'POST', body: fd})).json();
     }
   } catch (e) {
-    fail(e && e.message === 'too_big'
-      ? 'Upload failed — the file may be too large to upload here. Put it in Google Drive (share “Anyone with the link”) and paste the link instead — no upload needed.'
-      : 'Upload error. Try a smaller file, or paste a Google Drive link instead.');
+    fail('Upload had a problem. Please try again — or paste a Google Drive link instead.');
     return;
   }
 
@@ -474,30 +470,36 @@ function fail(text){
 
 // Upload via XHR so we can show a real progress % (fetch can't) and fail
 // cleanly instead of hanging on a too-large file.
-function postWithProgress(path, fd){
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', path);
-    xhr.timeout = 0;
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable){
-        const pc = Math.round(e.loaded / e.total * 100);
-        fill.style.width = pc + '%';
-        pctEl.textContent = pc + '%';
-        msg.textContent = pc < 100 ? 'Uploading file... ' + pc + '%'
-                                   : 'Upload done — starting...';
-      }
-    };
-    xhr.onload = () => {
-      let data = null;
-      try { data = JSON.parse(xhr.responseText); } catch (_) {}
-      if (xhr.status >= 400 && !(data && data.error)) { reject(new Error('too_big')); return; }
-      resolve(data || {});
-    };
-    xhr.onerror = () => reject(new Error('too_big'));
-    xhr.ontimeout = () => reject(new Error('too_big'));
-    xhr.send(fd);
-  });
+// Chunked upload: send the file in 5MB pieces so big files (200MB+) get past
+// the host's single-request size limit that stalls a normal upload.
+async function chunkedUpload(file, o, logoFile){
+  const CHUNK = 5 * 1024 * 1024;
+  const start = await (await fetch('/upload_start', {method:'POST'})).json();
+  const uid = start.upload_id;
+  const total = Math.ceil(file.size / CHUNK) || 1;
+  for (let i = 0; i < total; i++){
+    const blob = file.slice(i * CHUNK, (i + 1) * CHUNK);
+    const fd = new FormData();
+    fd.append('upload_id', uid);
+    fd.append('chunk', blob);
+    let ok = false;
+    for (let attempt = 0; attempt < 4 && !ok; attempt++){
+      try { const r = await fetch('/upload_chunk', {method:'POST', body: fd}); ok = r.ok; }
+      catch (_) { ok = false; }
+      if (!ok) await new Promise(r => setTimeout(r, 800));  // brief retry
+    }
+    if (!ok) throw new Error('chunk_failed');
+    const pc = Math.round((i + 1) / total * 100);
+    fill.style.width = pc + '%';
+    pctEl.textContent = pc + '%';
+    msg.textContent = pc < 100 ? 'Uploading file... ' + pc + '%' : 'Upload done — starting...';
+  }
+  const fd = new FormData();
+  fd.append('upload_id', uid);
+  fd.append('filename', file.name);
+  for (const k in o) fd.append(k, o[k]);
+  if (logoFile) fd.append('logo', logoFile);
+  return await (await fetch('/upload_done', {method:'POST', body: fd})).json();
 }
 
 async function poll(jobId){
