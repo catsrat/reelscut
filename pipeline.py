@@ -991,6 +991,11 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     if color_pop:
         fx.append("eq=contrast=1.06:saturation=1.28:brightness=0.02")
     if punch_zoom:
+        # Force a true 30fps FIRST (resamples by timestamp, preserving duration),
+        # then zoompan d=1 outputs 1 frame per frame at 30fps -> duration is kept
+        # and audio stays in sync. (Without the fps step, a non-30fps source —
+        # e.g. 60fps gameplay — drifts because zoompan re-times by frame count.)
+        fx.append("fps=30")
         fx.append(
             f"zoompan=z='min(pzoom+0.0006,1.12)':d=1:"
             f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={W}x{H}:fps=30"
