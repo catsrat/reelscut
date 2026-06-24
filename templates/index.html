@@ -143,7 +143,7 @@
     {% if show_link %}
     <div class="tabs">
       <button type="button" class="tab active" id="tab-upload">⬆ Upload a video</button>
-      <button type="button" class="tab" id="tab-link">🔗 Paste a link</button>
+      <button type="button" class="tab" id="tab-link">🔗 Google Drive link</button>
     </div>
     {% endif %}
 
@@ -167,14 +167,9 @@
 
     {% if show_link %}
     <div id="pane-link" style="display:none">
-      <input id="url" type="text" placeholder="Paste a Google Drive or YouTube link...">
+      <input id="url" type="text" placeholder="Paste a Google Drive link...">
       <p class="hint" style="text-align:left;margin-top:10px">
         ✅ <b>Google Drive works instantly</b> — share the file as “Anyone with the link,” then paste it here.
-        {% if yt_enabled %}
-        <br>✅ YouTube links are enabled.
-        {% else %}
-        <br>⚠️ YouTube links need extra setup on this server — use Google Drive or Upload for now.
-        {% endif %}
       </p>
     </div>
     {% endif %}
