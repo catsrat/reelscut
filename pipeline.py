@@ -618,8 +618,10 @@ def _font_for(text, size, latin_font=FONT_PATH):
         return ImageFont.truetype(FONT_PATH, size)
 
 
-def _caption_chunks(words, start, end):
-    """Group the clip's words into short on-screen chunks (times relative to clip)."""
+def _caption_chunks(words, start, end, max_words=MAX_CHUNK_WORDS):
+    """Group the clip's words into short on-screen chunks (times relative to clip).
+
+    max_words=1 gives the punchy one-word-at-a-time viral caption style."""
     inside = []
     for w in words:
         if w["end"] <= start or w["start"] >= end:
@@ -634,7 +636,7 @@ def _caption_chunks(words, start, end):
         if cur:
             gap = w["start"] - cur[-1]["end"]
             dur = w["end"] - cur[0]["start"]
-            if gap > CHUNK_GAP_BREAK or len(cur) >= MAX_CHUNK_WORDS or dur > MAX_CHUNK_SECS:
+            if gap > CHUNK_GAP_BREAK or len(cur) >= max_words or dur > MAX_CHUNK_SECS:
                 groups.append(cur)
                 cur = []
         cur.append(w)
@@ -651,7 +653,7 @@ def _caption_chunks(words, start, end):
     return chunks
 
 
-def _render_caption_png(text, png_path, style=None):
+def _render_caption_png(text, png_path, style=None, font_size=FONT_SIZE):
     """Render captions onto a SHORT strip (not a full frame) to save memory.
     Returns the strip height so the caller knows where to overlay it."""
     from PIL import Image, ImageDraw
@@ -660,7 +662,7 @@ def _render_caption_png(text, png_path, style=None):
     if style["upper"] and all(ord(c) < 0x250 for c in text):
         text = text.upper()
     color = style["color"] + (255,)
-    font = _font_for(text, FONT_SIZE, style["font"])
+    font = _font_for(text, font_size, style["font"])
 
     margin = 80
     max_w = W - 2 * margin
@@ -676,8 +678,9 @@ def _render_caption_png(text, png_path, style=None):
     if cur:
         lines.append(cur)
 
-    line_h = int(FONT_SIZE * 1.2)
+    line_h = int(font_size * 1.2)
     pad = 22
+    stroke = max(6, int(font_size * 0.11))
     strip_h = line_h * len(lines) + 2 * pad
     img = Image.new("RGBA", (W, strip_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -686,7 +689,7 @@ def _render_caption_png(text, png_path, style=None):
         x = (W - font.getlength(line)) / 2
         draw.text(
             (x, y), line, font=font, fill=color,
-            stroke_width=7, stroke_fill=(0, 0, 0, 255),
+            stroke_width=stroke, stroke_fill=(0, 0, 0, 255),
         )
         y += line_h
     img.save(png_path)
@@ -764,7 +767,8 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
               caption_style=DEFAULT_STYLE, music_volume=0.35, broll_path=None,
               split_mode="off", cam_corner="bottom-right", cam_size=CAM_SIZE,
               logo_path=None, logo_scale=0.16, logo_corner="top-right",
-              captions=True, jump_cut=True):
+              captions=True, jump_cut=True, punchy=False, punch_zoom=False,
+              color_pop=False):
     """Cut, remove dead space, crop to 9:16, overlay captions, optional music.
 
     split_mode:
@@ -784,7 +788,9 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
         split_mode = "off"  # no b-roll available
     split = split_mode in ("facecam", "broll")
 
-    caps = _caption_chunks(words, start, end) if captions else []
+    cap_words = 1 if punchy else MAX_CHUNK_WORDS
+    cap_font = int(FONT_SIZE * 1.55) if punchy else FONT_SIZE
+    caps = _caption_chunks(words, start, end, cap_words) if captions else []
 
     # Aggressive jump-cut: drop pauses so the clip is fast-paced. Skipped in
     # full-video mode so an already-edited reel keeps its original timing.
@@ -806,7 +812,7 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     cap_ys = []
     for i, (_, _, text) in enumerate(caps):
         png = os.path.join(out_dir, f"cap_{index:02d}_{i}.png")
-        strip_h = _render_caption_png(text, png, caption_style)
+        strip_h = _render_caption_png(text, png, caption_style, cap_font)
         oy = max(0, min(H - strip_h, int(H * cap_center - strip_h / 2)))
         cap_ys.append(oy)
         inputs += ["-i", os.path.abspath(png)]
@@ -866,7 +872,23 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
                 f"crop={W}:{H}")
         parts = [f"{vchain}{crop}[base]"]
 
-    last = "base"
+    # Viral polish applied to the footage only (captions/logo stay crisp on top):
+    #  - color_pop: punchier saturation/contrast for a scroll-stopping look.
+    #  - punch_zoom: a slow continuous zoom so static footage feels alive.
+    fx = []
+    if color_pop:
+        fx.append("eq=contrast=1.06:saturation=1.28:brightness=0.02")
+    if punch_zoom:
+        fx.append(
+            f"zoompan=z='min(pzoom+0.0006,1.12)':d=1:"
+            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={W}x{H}:fps=30"
+        )
+    base_label = "base"
+    if fx:
+        parts.append(f"[base]{','.join(fx)}[basefx]")
+        base_label = "basefx"
+
+    last = base_label
     for i, (rs, re_, _) in enumerate(caps):
         nxt = f"v{i}"
         parts.append(
@@ -969,7 +991,8 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
                  caption_style=DEFAULT_STYLE, sarvam_key=None, music_volume=0.35,
                  split_mode="off", cam_corner="bottom-right", cam_size=CAM_SIZE,
                  source_file=None, logo_file=None, logo_scale=0.16,
-                 logo_corner="top-right", clip_mode="moments", captions=True):
+                 logo_corner="top-right", clip_mode="moments", captions=True,
+                 punchy=False, punch_zoom=False, color_pop=False):
     """
     Full run. `progress(pct, message)` is called to report status.
     `language` is "en" (fast local English model), or a code like "te"/"hi"/"ta"
@@ -1084,6 +1107,7 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
             music_volume, broll_path, split_mode, cam_corner, cam_size,
             logo_path=logo_file, logo_scale=logo_scale, logo_corner=logo_corner,
             captions=captions, jump_cut=(not full_mode),
+            punchy=punchy, punch_zoom=punch_zoom, color_pop=color_pop,
         )
         # Actual length after dead-space removal (falls back to the cut range).
         actual = _probe_duration(os.path.join(workdir, fname))

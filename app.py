@@ -55,6 +55,10 @@ def _collect_opts(get):
         # captions default ON; the form sends "true"/"false".
         "captions": (str(get("captions")).lower() in ("true", "1", "on", "yes"))
         if get("captions") is not None else True,
+        # Viral effects (all default OFF unless toggled on).
+        "punchy": str(get("punchy")).lower() in ("true", "1", "on", "yes"),
+        "punch_zoom": str(get("punch_zoom")).lower() in ("true", "1", "on", "yes"),
+        "color_pop": str(get("color_pop")).lower() in ("true", "1", "on", "yes"),
     }
 
 
@@ -99,6 +103,9 @@ def _worker(job_id, opts):
             logo_corner=opts.get("logo_corner", "top-right"),
             clip_mode=opts.get("clip_mode", "moments"),
             captions=opts.get("captions", True),
+            punchy=opts.get("punchy", False),
+            punch_zoom=opts.get("punch_zoom", False),
+            color_pop=opts.get("color_pop", False),
         )
         # If R2 is configured, upload clips and attach durable URLs.
         if storage.enabled():

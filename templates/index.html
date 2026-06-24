@@ -200,6 +200,13 @@
     <details class="opts-wrap">
       <summary>Editing options (language, captions, layout, music)</summary>
       <div class="opts">
+        <div class="logo-sec" style="margin-bottom:16px">
+          <div class="logo-head">✨ Viral effects</div>
+          <label class="check"><input type="checkbox" id="punchy"> Punchy captions — one big word at a time (Hormozi style)</label>
+          <label class="check"><input type="checkbox" id="punchzoom"> Punch-in zoom — subtle motion so footage feels alive</label>
+          <label class="check"><input type="checkbox" id="colorpop"> Color pop — vibrant, scroll-stopping colors</label>
+        </div>
+
         <div class="logo-sec">
           <div class="logo-head">🎨 Your logo / watermark <span>(optional)</span></div>
           <div class="logo-row">
@@ -385,6 +392,9 @@ function opts(){
     logo_corner: document.getElementById('logocorner').value,
     clip_mode: document.getElementById('clipmode').value,
     captions: document.getElementById('captions').checked,
+    punchy: document.getElementById('punchy').checked,
+    punch_zoom: document.getElementById('punchzoom').checked,
+    color_pop: document.getElementById('colorpop').checked,
   };
 }
 
