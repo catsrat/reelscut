@@ -624,7 +624,8 @@ def pick_moments_ai(segments, api_key, max_clips=5, min_clip=None, max_clip=None
 
 
 def pick_moments_heuristic(segments, max_clips=5):
-    """Fallback when no API key: chunk the transcript into ~MAX_CLIP windows."""
+    """Fallback when the AI picker is off or unavailable: chunk the transcript
+    into ~TARGET_CLIP windows."""
     clips = []
     total = segments[-1]["end"]
     target = TARGET_CLIP
@@ -642,7 +643,7 @@ def pick_moments_heuristic(segments, max_clips=5):
             "start": t,
             "end": end,
             "title": title.strip(),
-            "reason": "Auto-selected (no AI key set).",
+            "reason": "Auto-selected.",
             "mood": "neutral",
         })
         t = end
@@ -1394,8 +1395,17 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
         # Scale the number of clips to the video length (~1 per few minutes).
         max_clips = max(3, min(MAX_CLIPS_CAP, round(total / 60 / CLIP_EVERY_MINUTES)))
         if api_key:
+            import anthropic
             progress(68, f"Claude is picking the best moments (up to {max_clips})...")
-            clips = pick_moments_ai(phrases, api_key, max_clips, min_clip, max_clip)
+            try:
+                clips = pick_moments_ai(phrases, api_key, max_clips, min_clip, max_clip)
+            except (anthropic.APIError, ValueError, StopIteration) as e:
+                # The AI step being unavailable (no credits, outage, unusable
+                # reply) must not fail the whole job: log the real reason for
+                # the owner, keep it out of the user's UI, and fall back.
+                print(f"[ai] moment picker failed — using automatic selection: {e}", flush=True)
+                progress(70, "Using automatic moment selection...")
+                clips = pick_moments_heuristic(phrases, max_clips)
             if not clips:
                 progress(70, "Little speech found — using automatic selection...")
                 clips = pick_moments_heuristic(phrases, max_clips)
