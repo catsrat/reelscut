@@ -1,0 +1,41 @@
+# Render Blueprint — one-click setup: Render dashboard → New → Blueprint → pick
+# this repo. Creates the app (web server + job worker in one container, see
+# Dockerfile CMD) with a persistent disk for the database.
+#
+# On creation Render asks for each `sync: false` value. Leave the WHOP_* ones
+# empty only for a private test: without WHOP_CLIENT_ID there is no login and no
+# limit, so anyone with the URL can use your API keys. See DEPLOY.md.
+services:
+  - type: web
+    name: reelscut
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: frankfurt          # can't be changed later
+    plan: 1c-2g                # video + whisper need real CPU/RAM; raise if slow
+    healthCheckPath: /
+    autoDeployTrigger: commit
+    disk:
+      name: data
+      mountPath: /app/data     # SQLite: accounts, job queue, minutes used
+      sizeGB: 5
+    envVars:
+      - key: DATA_DIR
+        value: /app/data
+      - key: SECRET_KEY        # signs login cookies
+        generateValue: true
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: PUBLIC_URL        # e.g. https://reelscut.onrender.com
+        sync: false
+      - key: WHOP_CLIENT_ID
+        sync: false
+      - key: WHOP_API_KEY
+        sync: false
+      - key: WHOP_PLANS        # e.g. prod_aaa:Creator:300,prod_bbb:Pro:1200
+        sync: false
+      - key: WHOP_STORE_URL
+        sync: false
+      - key: FREE_MINUTES
+        value: "30"

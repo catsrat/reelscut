@@ -18,23 +18,29 @@ This covers **Phase 2: deploy the worker** (the engine) to Render. Later phases
 3. From `~/clip-reels`, push the code (ask me and I'll give you the exact commands).
    - `.dockerignore` already excludes `venv/`, `jobs/`, `models/`.
 
-## Step 2 — Create the worker on Render
-1. Sign up at **render.com** (free to start).
-2. **New → Web Service → Build from a Git repo →** pick your `clip-reels` repo.
-3. Render auto-detects the `Dockerfile`. Settings:
-   - **Instance type:** start with **Standard** (the free/starter tier has too
-     little RAM/CPU for video + whisper). ~$7–25/mo.
-   - **Disk:** add a small persistent disk (e.g. 1–10 GB) mounted at `/app/data`.
-     It holds the SQLite database (accounts, job queue, minutes used). Without
-     it, every redeploy forgets who used how many minutes. Rendered clips in
-     `/app/jobs` are temporary (deleted after `JOB_TTL_HOURS`); set up R2
-     (Phase 3) so the clips themselves survive.
-4. **Environment variables** (Settings → Environment):
-   - `ANTHROPIC_API_KEY` = your key
-   - `SARVAM_API_KEY` = your key
-   - (`PORT` is set by Render automatically)
-5. **Create Web Service.** First build takes a while (it compiles whisper.cpp +
-   downloads the model). Watch the logs.
+## Step 2 — Create the app on Render (Blueprint)
+> **Not Vercel.** Vercel runs short serverless functions with a read-only disk,
+> no ffmpeg and no background worker, so this app crashes there
+> (`FUNCTION_INVOCATION_FAILED`). Delete the Vercel project (or disconnect the
+> repo) so pushes to `main` stop deploying there.
+
+1. Sign up at **render.com** and connect your GitHub.
+2. **New → Blueprint →** pick the `reelscut` repo. Render reads `render.yaml` and
+   sets up everything: Docker build, the 1 CPU / 2 GB instance, Frankfurt region,
+   and a 5 GB persistent disk at `/app/data`. Change the plan/region in
+   `render.yaml` first if you want something else (the region can't change later).
+   - The disk holds the SQLite database (accounts, job queue, minutes used).
+     Rendered clips in `/app/jobs` are temporary (deleted after `JOB_TTL_HOURS`);
+     set up R2 (Phase 3) so the clips themselves survive.
+3. Render asks for the secret values:
+   - `ANTHROPIC_API_KEY`, `SARVAM_API_KEY` — your keys.
+   - `PUBLIC_URL` — the service URL, e.g. `https://reelscut.onrender.com`
+     (you can fill it in after the first deploy).
+   - `WHOP_*` — see "Accounts, plans & payments" below. ⚠️ Without
+     `WHOP_CLIENT_ID` the app has **no login and no limits**: fine for a quick
+     private test, but anyone with the URL could use your API keys.
+4. **Apply.** The first build takes a while (it compiles whisper.cpp and downloads
+   the model). Watch the logs. Pushes to `main` redeploy automatically.
 
 ## Step 3 — Test it
 - Open the Render URL → upload a short video → confirm you get clips.
