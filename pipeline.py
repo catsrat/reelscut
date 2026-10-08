@@ -1198,6 +1198,100 @@ def _get_face_center(video_path, start, end):
     return sum(centers) / len(centers) if centers else 0.5
 
 CAM_SIZE = 0.30  # facecam box width as a fraction of the source width
+CAM_PRESET_FALLBACK = 0.28  # "medium" — used when auto-detection isn't confident
+
+
+@functools.lru_cache(maxsize=16)
+def detect_facecam(video_path, corner=None, samples=12):
+    """Find a streamer's webcam overlay in a recording.
+
+    Returns (x, y, w, h, corner) in source pixels, or None if not confident.
+    - Corner: where the streamer's face sits across sampled frames (unless given).
+    - Box: an overlay has straight borders that stay put for the whole stream
+      while the game behind it changes. The per-pixel MEDIAN edge strength over
+      many frames keeps those persistent borders and washes out moving content;
+      each box edge is the line that is strong along the other edge's span.
+    Cached per video, so all reels of a job share one detection (~10 s).
+    Tested: finds a 513x288 top-left cam within ~8 px (inside, never larger),
+    the same cam moved bottom-right, and returns None for gameplay with no cam.
+    """
+    import cv2
+    import numpy as np
+
+    cap = cv2.VideoCapture(video_path)
+    W0 = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    H0 = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    dur = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / fps
+    if not (W0 and H0 and dur):
+        cap.release()
+        return None
+    sw = 640
+    scale = sw / W0
+    sh = int(round(H0 * scale))
+    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    gxs, gys, faces = [], [], []
+    for t in np.linspace(dur * 0.05, dur * 0.95, samples):
+        cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000)
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        g = cv2.cvtColor(cv2.resize(frame, (sw, sh), interpolation=cv2.INTER_AREA),
+                         cv2.COLOR_BGR2GRAY)
+        gf = g.astype(np.float32)
+        gxs.append(np.abs(cv2.Sobel(gf, cv2.CV_32F, 1, 0, ksize=3)))
+        gys.append(np.abs(cv2.Sobel(gf, cv2.CV_32F, 0, 1, ksize=3)))
+        for (fx, fy, fw, fh) in cascade.detectMultiScale(g, 1.1, 5, minSize=(20, 20)):
+            faces.append((fx + fw / 2, fy + fh / 2))
+    cap.release()
+    if len(gxs) < 6:
+        return None
+
+    if corner in (None, "", "auto"):
+        if len(faces) < 3:
+            return None
+        cx = np.median([f[0] for f in faces])
+        cy = np.median([f[1] for f in faces])
+        corner = ("top" if cy < sh / 2 else "bottom") + "-" + ("left" if cx < sw / 2 else "right")
+    right, bottom = corner.endswith("right"), corner.startswith("bottom")
+
+    gx = np.median(np.stack(gxs), axis=0)
+    gy = np.median(np.stack(gys), axis=0)
+    if right:  # orient so the cam's corner is top-left
+        gx, gy = gx[:, ::-1], gy[:, ::-1]
+    if bottom:
+        gx, gy = gx[::-1, :], gy[::-1, :]
+    thr_x = max(25.0, float(np.percentile(gx, 92)))
+    thr_y = max(25.0, float(np.percentile(gy, 92)))
+
+    def best_col(row_end):
+        # share of the cam's height with a strong vertical edge at x (±1 px)
+        band = gx[:row_end] > thr_x
+        cov = np.zeros(sw)
+        for x in range(int(sw * 0.10), int(sw * 0.70)):
+            cov[x] = band[:, x - 1:x + 2].any(axis=1).mean()
+        x = int(cov.argmax())
+        return x, float(cov[x])
+
+    def best_row(col_end):
+        band = gy[:, :col_end] > thr_y
+        cov = np.zeros(sh)
+        for y in range(int(sh * 0.08), int(sh * 0.70)):
+            cov[y] = band[y - 1:y + 2, :].any(axis=0).mean()
+        y = int(cov.argmax())
+        return y, float(cov[y])
+
+    y, _ = best_row(int(sw * 0.45))
+    for _ in range(2):  # refine: each edge measured along the other's span
+        x, cov_x = best_col(max(y, 8))
+        y, cov_y = best_row(max(x, 8))
+    if min(cov_x, cov_y) < 0.6:
+        return None
+    w, h = x / scale, y / scale
+    if not (1.1 <= w / h <= 2.4):  # webcams are 4:3 .. ultra-wide, not slivers
+        return None
+    w, h = int(w) // 2 * 2, int(h) // 2 * 2
+    return (int(W0 - w) if right else 0, int(H0 - h) if bottom else 0, w, h, corner)
 
 # Facecam layout: webcam overlays are 16:9 boxes, so the cam is cropped 16:9 and
 # shown full-width on top (720x405); the game fills the rest below. Cam on top
@@ -1268,6 +1362,27 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
         split_mode = "off"  # no b-roll available
     split = split_mode in ("facecam", "broll")
 
+    # Streamer layout: find the actual webcam box when corner/size are "auto"
+    # (the default), so the top strip is exactly the cam — no gameplay or site
+    # toolbar around it — and sized to the cam's real shape (16:9, 4:3, ...).
+    cam_box = None
+    cam_panel_h = CAM_PANEL_H
+    if split_mode == "facecam":
+        if cam_size == "auto" or cam_corner == "auto":
+            try:
+                cam_box = detect_facecam(video_path, None if cam_corner == "auto" else cam_corner)
+            except Exception as e:  # never fail a reel over detection
+                print(f"[facecam] detection error: {e}", flush=True)
+            print(f"[facecam] auto-detect -> {cam_box or 'not found, using preset'}", flush=True)
+        if cam_box:
+            cam_corner = cam_box[4]
+            bw, bh = cam_box[2], cam_box[3]
+            cam_panel_h = max(300, min(640, int(round(W * bh / bw)) // 2 * 2))
+        if cam_corner == "auto":
+            cam_corner = "bottom-right"
+        if cam_size == "auto":
+            cam_size = CAM_PRESET_FALLBACK
+
     cap_words = 1 if punchy else MAX_CHUNK_WORDS
     cap_font = int(FONT_SIZE * 1.55) if punchy else FONT_SIZE
     caps = _caption_chunks(words, start, end, cap_words) if captions else []
@@ -1287,7 +1402,7 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
         caps = [(a, b, t) for a, b, t in caps if b - a > 0.04]
 
     if split_mode == "facecam":
-        cap_center = (CAM_PANEL_H + 90) / H  # just under the cam, clear of the face
+        cap_center = (cam_panel_h + 90) / H  # just under the cam, clear of the face
     elif split:
         cap_center = 0.5  # captions on the seam
     else:
@@ -1361,11 +1476,14 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
         x_expr = x_expr.format(F=cam_size)
         y_expr = y_expr.format(F=cam_size)
         cam_crop = f"crop=iw*{cam_size}:iw*{cam_size}*9/16:{x_expr}:{y_expr}"
-        game_h = H - CAM_PANEL_H
+        if cam_box:  # exact detected webcam box, in source pixels
+            bx, by, bw, bh = cam_box[:4]
+            cam_crop = f"crop={bw}:{bh}:{bx}:{by}"
+        game_h = H - cam_panel_h
         # Game: the centre of the frame (where the action is). The tall crop
         # is narrow enough that a corner cam stays out of it.
         game_fill = _fill(W, game_h)
-        cam_fill = _fill(W, CAM_PANEL_H)
+        cam_fill = _fill(W, cam_panel_h)
         parts = [
             f"{vchain}split=2[g][c]",
             f"[c]{cam_crop},{cam_fill}[top]",
