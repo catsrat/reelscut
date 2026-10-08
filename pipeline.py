@@ -550,6 +550,46 @@ def _phrase(group):
     }
 
 
+# Whisper writes non-speech as bracketed tags — "(upbeat music)", "[Music]",
+# "[BLANK_AUDIO]", "(laughs)" — split across word entries ("(upbeat", "music)").
+# Tags are short, so a bracket that doesn't close within a few words is kept.
+_TAG_CLOSE = {"(": ")", "[": "]"}
+_TAG_MAX_WORDS = 5
+_MUSIC_NOTES = re.compile("[♩♪♫♬]")
+
+
+def strip_sound_tags(words):
+    """Drop bracketed non-speech tags and music notes from a word list, keeping
+    every real word (also text glued to a tag: "[Music]Hey" -> "Hey")."""
+    words = [dict(w) for w in words]
+    out, i = [], 0
+    while i < len(words):
+        text = words[i]["text"].strip()
+        close = _TAG_CLOSE.get(text[:1])
+        tag_end = None
+        if close:
+            for j in range(i, min(len(words), i + _TAG_MAX_WORDS)):
+                t = words[j]["text"].strip()
+                k = t.find(close, 1 if j == i else 0)
+                if k >= 0:
+                    tag_end = (j, t[k + 1:].strip())
+                    break
+        if tag_end:
+            j, rest = tag_end
+            if any(c.isalnum() for c in rest):
+                words[j]["text"] = rest  # re-checked: it may be another tag
+                i = j
+            else:
+                i = j + 1
+            continue
+        text = _MUSIC_NOTES.sub("", text).strip()
+        if text:
+            words[i]["text"] = text
+            out.append(words[i])
+        i += 1
+    return out
+
+
 def transcribe_sarvam(audio_path, workdir, language, api_key, progress=None):
     """Transcribe via Sarvam (accurate for Indian languages). Returns word list.
 
@@ -1420,7 +1460,8 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     split_mode:
       "off"      — normal full-frame vertical.
       "facecam"  — single source split into the 16:9 corner facecam (top strip)
-                   + the game (rest of the frame below).
+                   + the game (rest of the frame below). With cam_corner
+                   "auto" and no webcam found, the reel renders as "off".
       "broll"    — speaker on top, looping b-roll (broll_path) on the bottom.
     Captions sit on the seam in split modes.
 
@@ -1446,13 +1487,18 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
                 cam_box = detect_facecam(video_path, None if cam_corner == "auto" else cam_corner)
             except Exception as e:  # never fail a reel over detection
                 print(f"[facecam] detection error: {e}", flush=True)
-            print(f"[facecam] auto-detect -> {cam_box or 'not found, using preset'}", flush=True)
+            print(f"[facecam] auto-detect -> {cam_box or 'not found'}", flush=True)
         if cam_box:
             cam_corner = cam_box[4]
             bw, bh = cam_box[2], cam_box[3]
             cam_panel_h = max(300, min(640, int(round(W * bh / bw)) // 2 * 2))
-        if cam_corner == "auto":
-            cam_corner = "bottom-right"
+        elif cam_corner == "auto":
+            # No webcam (gameplay only, or chat / a casino UI in the corner): a
+            # preset box would put whatever sits in that corner on top, so this
+            # reel gets the normal full-screen vertical. A corner the user
+            # picked still gets the preset box.
+            print("[facecam] no webcam found -> full-screen layout", flush=True)
+            split_mode, split = "off", False
         if cam_size == "auto":
             cam_size = CAM_PRESET_FALLBACK
 
@@ -1841,6 +1887,9 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
                 msg += ("\n\nWindows Application Control is blocking the local transcription "
                         "binaries. Set GROQ_API_KEY or SARVAM_API_KEY to use cloud transcription.")
             raise RuntimeError(msg)
+        # "(upbeat music)" / "[Music]" aren't speech: keep them out of the
+        # captions and the transcript the moment picker reads.
+        words = strip_sound_tags(words)
     phrases = group_phrases(words)
 
     total = dur or (words[-1]["end"] if words else 0)
