@@ -26,6 +26,8 @@ from datetime import timedelta
 from flask import (
     Flask, render_template, request, jsonify, send_from_directory, abort
 )
+from urllib.parse import urlencode
+
 from werkzeug.utils import secure_filename
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -222,7 +224,9 @@ def cleanup_jobs():
     now = time.time()
     active = db.active_job_ids()
     with UPLOADS_LOCK:
-        pending = set(PENDING_UPLOADS)
+        _drop_stale_tickets(now)
+        # Reelscut Fetch tickets are uploads that haven't started yet.
+        pending = set(PENDING_UPLOADS) | set(FETCH_TICKETS)
     removed = 0
     for name in os.listdir(JOBS_DIR):
         path = os.path.join(JOBS_DIR, name)
@@ -320,6 +324,7 @@ def index(user):
     show_link = pipeline.ytdlp_available()
     return render_template(
         "index.html", has_key=has_key, show_link=show_link, yt_enabled=_yt_enabled(),
+        fetch_enabled=FETCH_ENABLED,
         user=user, quota=billing.quota_json(billing.quota(user)),
         accounts=auth.enabled(), max_upload=_size_label(MAX_UPLOAD_BYTES),
     )
@@ -346,14 +351,9 @@ def process(user):
         return jsonify({"error": "Please paste a full link starting with https://"}), 400
     if pipeline.is_youtube(url) and not _yt_enabled():
         return jsonify({"error": pipeline.YOUTUBE_BLOCKED_MSG}), 400
-    try:
-        start = pipeline.parse_time(request.form.get("start"))
-        end = pipeline.parse_time(request.form.get("end"))
-    except ValueError:
-        return jsonify({"error": "Write From and To like 1:20:00 (hours:minutes:"
-                                 "seconds) or 80 (minutes)."}), 400
-    if start is not None and end is not None and end <= start + 10:
-        return jsonify({"error": "To must be later than From."}), 400
+    start, end, bad = _range_from_form()
+    if bad:
+        return bad
     refusal = _refuse(user)
     if refusal:
         return jsonify(refusal[0]), refusal[1]
@@ -537,6 +537,263 @@ def upload_done(user):
     opts["title"] = os.path.splitext(name)[0]
     _attach_logo(workdir, opts)
     return _enqueue(user, uid, opts, opts["title"])
+
+
+# ---- Reelscut Fetch: YouTube doesn't let servers download videos, so the
+# user's own computer does it. The page asks for a one-time ticket, the browser
+# opens the Reelscut Fetch app with reelscut://fetch?s=<site>&t=<token>, and
+# the app downloads the video on the user's connection (with their own YouTube
+# sign-in for 18+ videos, kept on their computer) and uploads it here with the
+# token. Tickets live in memory, like chunked uploads (one gunicorn worker). ----
+
+FETCH_TTL_SECS = UPLOAD_TTL_SECS
+# Off until the helper .exe is code-signed: Windows Defender / Smart App
+# Control block a new unsigned app, so offering it would just fail for users.
+FETCH_ENABLED = os.environ.get("FETCH_ENABLED", "").strip().lower() in ("1", "true", "yes")
+FETCH_HELPER_URL = os.environ.get(
+    "FETCH_HELPER_URL",
+    "https://github.com/catsrat/reelscut/releases/download/fetch-latest/ReelscutFetch.exe")
+FETCH_TICKETS = {}  # ticket id (also the job id) -> ticket; guarded by UPLOADS_LOCK
+TIME_FORMAT_MSG = ("Write From and To like 1:20:00 (hours:minutes:seconds) "
+                   "or 80 (minutes).")
+
+
+def _range_from_form():
+    """(start, end, error_reply) from the From/To fields."""
+    try:
+        start = pipeline.parse_time(request.form.get("start"))
+        end = pipeline.parse_time(request.form.get("end"))
+    except ValueError:
+        return None, None, (jsonify({"error": TIME_FORMAT_MSG}), 400)
+    if start is not None and end is not None and end <= start + 10:
+        return None, None, (jsonify({"error": "To must be later than From."}), 400)
+    return start, end, None
+
+
+def _drop_stale_tickets(now):
+    """Forget quiet tickets; call with UPLOADS_LOCK held."""
+    for k, t in list(FETCH_TICKETS.items()):
+        if now - t["touched"] > FETCH_TTL_SECS:
+            FETCH_TICKETS.pop(k)
+
+
+@app.route("/fetch/new", methods=["POST"])
+@auth.login_required
+def fetch_new(user):
+    if not FETCH_ENABLED:
+        return jsonify({"error": pipeline.YOUTUBE_BLOCKED_MSG}), 400
+    url = (request.form.get("url") or "").strip()
+    if not re.fullmatch(r"https?://\S+", url, re.I) or not pipeline.is_youtube(url):
+        return jsonify({"error": "Paste a YouTube link."}), 400
+    start, end, bad = _range_from_form()
+    if bad:
+        return bad
+    refusal = _refuse(user)
+    if refusal:
+        return jsonify(refusal[0]), refusal[1]
+
+    now = time.time()
+    fid = uuid.uuid4().hex[:12]
+    workdir = os.path.join(JOBS_DIR, fid)
+    os.makedirs(workdir, exist_ok=True)
+    opts = _collect_opts(request.form.get)
+    opts["url"] = None
+    _attach_logo(workdir, opts)
+    with UPLOADS_LOCK:
+        _drop_stale_tickets(now)
+        # One open ticket per user: pressing the button again replaces it.
+        for k, t in list(FETCH_TICKETS.items()):
+            if t["user"] == user["id"] and not t["job_id"]:
+                FETCH_TICKETS.pop(k)
+                shutil.rmtree(os.path.join(JOBS_DIR, k), ignore_errors=True)
+        FETCH_TICKETS[fid] = {
+            "id": fid, "token": secrets.token_urlsafe(24), "user": user["id"],
+            "account": user["name"] or user["email"] or "your account",
+            "url": url, "start": start, "end": end, "opts": opts,
+            "touched": now, "stage": "waiting", "pct": 0, "message": "",
+            "title": "", "size": 0, "chunks": {}, "job_id": None, "error": None,
+        }
+        token = FETCH_TICKETS[fid]["token"]
+    site = os.environ.get("PUBLIC_URL", "").strip().rstrip("/") or request.url_root.rstrip("/")
+    return jsonify({
+        "fetch_id": fid,
+        "link": "reelscut://fetch?" + urlencode({"s": site, "t": token}),
+        "helper_url": FETCH_HELPER_URL,
+    })
+
+
+@app.route("/status/fetch/<fid>")
+@auth.login_required
+def fetch_status(user, fid):
+    with UPLOADS_LOCK:
+        t = FETCH_TICKETS.get(fid)
+        if not t or t["user"] != user["id"]:
+            return jsonify({"error": "This YouTube link expired — press Make my "
+                                     "reels again."}), 404
+        return jsonify({k: t[k] for k in ("stage", "pct", "message", "title",
+                                          "job_id", "error")})
+
+
+def _ticket():
+    """The ticket for this request's X-Fetch-Token (the app's only credential),
+    or None. Tokens go in a header, never the URL, so they stay out of logs."""
+    token = request.headers.get("X-Fetch-Token", "")
+    if not token:
+        return None
+    now = time.time()
+    with UPLOADS_LOCK:
+        for t in FETCH_TICKETS.values():
+            if secrets.compare_digest(t["token"], token):
+                if now - t["touched"] > FETCH_TTL_SECS or t["stage"] == "error":
+                    return None
+                t["touched"] = now
+                return t
+    return None
+
+
+def _no_ticket():
+    return jsonify({"error": "This link expired. Go back to Reelscut and press "
+                             "Make my reels again."}), 404
+
+
+@app.route("/fetch/api/ticket")
+def fetch_api_ticket():
+    t = _ticket()
+    if not t:
+        return _no_ticket()
+    user = db.get_user(t["user"])
+    q = billing.quota(user)
+    with UPLOADS_LOCK:
+        if t["stage"] == "waiting":
+            t["stage"], t["message"] = "opened", "Reelscut Fetch opened"
+    return jsonify({
+        "url": t["url"], "start": t["start"], "end": t["end"],
+        "account": t["account"], "max_bytes": MAX_UPLOAD_BYTES,
+        "max_minutes": pipeline.MAX_VIDEO_MINUTES,
+        "minutes_left": None if q["unlimited"] else round(q["left"], 1),
+    })
+
+
+@app.route("/fetch/api/progress", methods=["POST"])
+def fetch_api_progress():
+    t = _ticket()
+    if not t:
+        return _no_ticket()
+    d = request.get_json(silent=True) or {}
+    with UPLOADS_LOCK:
+        if d.get("stage") in ("preparing", "downloading", "uploading"):
+            t["stage"] = d["stage"]
+        try:
+            t["pct"] = max(0.0, min(100.0, float(d.get("pct") or 0)))
+        except (TypeError, ValueError):
+            pass
+        t["message"] = str(d.get("message") or "")[:200]
+        if d.get("title"):
+            t["title"] = str(d["title"])[:200]
+    return jsonify({"ok": True})
+
+
+@app.route("/fetch/api/fail", methods=["POST"])
+def fetch_api_fail():
+    t = _ticket()
+    if not t:
+        return _no_ticket()
+    d = request.get_json(silent=True) or {}
+    with UPLOADS_LOCK:
+        t["stage"] = "error"
+        t["error"] = str(d.get("message") or "Reelscut Fetch stopped.")[:400]
+    shutil.rmtree(os.path.join(JOBS_DIR, t["id"]), ignore_errors=True)
+    return jsonify({"ok": True})
+
+
+@app.route("/fetch/api/upload_start", methods=["POST"])
+def fetch_api_upload_start():
+    t = _ticket()
+    if not t:
+        return _no_ticket()
+    d = request.get_json(silent=True) or {}
+    try:
+        size = int(d.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size <= 0:
+        return jsonify({"error": "The download is empty."}), 400
+    if size > MAX_UPLOAD_BYTES:
+        return jsonify({"error": _too_big_msg()}), 413
+    if not _disk_ok(size):
+        return jsonify({"error": DISK_MSG}), 507
+    workdir = os.path.join(JOBS_DIR, t["id"])
+    os.makedirs(workdir, exist_ok=True)
+    open(os.path.join(workdir, "upload.part"), "wb").close()
+    with UPLOADS_LOCK:
+        t["size"], t["chunks"], t["stage"] = size, {}, "uploading"
+    return jsonify({"ok": True, "chunk_bytes": 8 * MB})
+
+
+@app.route("/fetch/api/chunk", methods=["POST"])
+def fetch_api_chunk():
+    t = _ticket()
+    if not t:
+        return _no_ticket()
+    part = os.path.join(JOBS_DIR, t["id"], "upload.part")
+    try:
+        offset = int(request.args.get("offset", ""))
+    except ValueError:
+        return jsonify({"error": "bad offset"}), 400
+    data = request.get_data()
+    if offset < 0 or not t["size"] or offset + len(data) > t["size"]:
+        return jsonify({"error": "Upload got out of sync — please try again."}), 409
+    if not os.path.exists(part):
+        return _no_ticket()
+    with open(part, "r+b") as f:  # pieces arrive in parallel, any order
+        f.seek(offset)
+        f.write(data)
+    with UPLOADS_LOCK:
+        t["chunks"][offset] = len(data)
+    return jsonify({"ok": True})
+
+
+@app.route("/fetch/api/done", methods=["POST"])
+def fetch_api_done():
+    t = _ticket()
+    if not t:
+        return _no_ticket()
+    workdir = os.path.join(JOBS_DIR, t["id"])
+    part = os.path.join(workdir, "upload.part")
+    with UPLOADS_LOCK:
+        got = sum(t["chunks"].values())
+    if not os.path.exists(part) or got < t["size"] or os.path.getsize(part) < t["size"]:
+        return jsonify({"error": "The upload didn't finish — some pieces are "
+                                 "missing. Please try again."}), 400
+
+    def failed(msg, status):
+        with UPLOADS_LOCK:
+            t["stage"], t["error"] = "error", msg
+        shutil.rmtree(workdir, ignore_errors=True)
+        return jsonify({"error": msg}), status
+
+    user = db.get_user(t["user"])
+    refusal = _refuse(user)
+    if refusal:
+        return failed(refusal[0]["error"], refusal[1])
+    saved = os.path.join(workdir, "source.mp4")
+    os.replace(part, saved)
+    q = billing.quota(user)
+    dur = pipeline._probe_duration(saved)
+    if not dur:
+        return failed("That download isn't a playable video — please try again.", 400)
+    if not q["unlimited"] and dur / 60 > q["left"] + 0.01:
+        return failed(f"This video is {dur / 60:.0f} min, but your {q['plan']} plan "
+                      f"has {q['left']:.0f} min left this month. Pick a shorter "
+                      "part or upgrade.", 402)
+
+    opts = dict(t["opts"])
+    opts["source_file"] = saved
+    opts["title"] = t["title"] or "YouTube video"
+    db.create_job(t["id"], user["id"], opts, opts["title"])
+    with UPLOADS_LOCK:
+        t["stage"], t["pct"], t["job_id"] = "queued", 100, t["id"]
+    return jsonify({"ok": True})
 
 
 def _own_job(job_id, user):

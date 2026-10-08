@@ -122,6 +122,12 @@
   .note.warn{color:var(--warn)}
   .note.warn svg.i{color:var(--warn)}
   .two.range{margin-top:2px;grid-template-columns:1fr 1fr}
+  .fetchbox{margin-top:14px;padding:14px;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);transition:border-color .2s}
+  .fetchbox[hidden]{display:none}
+  .fetchbox.nudge{border-color:rgba(255,59,78,.55)}
+  .fb-row{display:flex;gap:8px;flex-wrap:wrap}
+  .fb-note{font-size:13px;color:var(--text-3);margin:10px 0 0;line-height:1.5}
+  .fb-note b{color:var(--text-2);font-weight:600}
   .lbl .opt{font-weight:400;color:var(--text-3);margin-left:4px}
 
   /* mode choice cards */
@@ -305,9 +311,9 @@
 
       {% if show_link %}
       <div id="pane-link" style="display:none">
-        <input id="url" type="text" inputmode="url" autocomplete="off" placeholder="Kick replay or Google Drive link">
+        <input id="url" type="text" inputmode="url" autocomplete="off" placeholder="YouTube, Kick or Google Drive link">
         <p class="note" id="linknote"><svg class="i"><use href="#i-check"/></svg><span>Kick and Twitch replays work as they are. Google Drive files must be shared as “Anyone with the link”.</span></p>
-        <p class="note warn" id="ytnote" hidden><svg class="i"><use href="#i-alert"/></svg><span>YouTube doesn't let our servers download videos. Download it on your device and upload the file, or paste the Kick replay or Google Drive link instead.</span></p>
+        <p class="note" id="ytnote" hidden><svg class="i"><use href="#i-check"/></svg><span></span></p>
         <div class="two range">
           <div><label class="lbl" for="start">From <span class="opt">optional</span></label>
             <input id="start" type="text" inputmode="numeric" autocomplete="off" placeholder="1:20:00"></div>
@@ -471,6 +477,13 @@
       <div class="pct" id="pct">0%</div>
     </div>
     <div class="msg" id="msg"></div>
+    <div class="fetchbox" id="fetchbox" hidden>
+      <div class="fb-row">
+        <a class="btn btn-primary btn-sm" id="fetchopen" href="#">Open Reelscut Fetch</a>
+        <a class="btn btn-secondary btn-sm" id="fetchget" href="#" rel="noopener"><svg class="i"><use href="#i-download"/></svg>Get Reelscut Fetch for Windows</a>
+      </div>
+      <p class="fb-note">YouTube doesn't let servers download videos, so Reelscut Fetch gets the video on this computer and sends it here. First time: download it, run it once, then press <b>Open Reelscut Fetch</b>. If Windows says it's from an unknown publisher, choose <b>More info → Run anyway</b>.</p>
+    </div>
   </div>
 
   <div id="results"></div>
@@ -558,11 +571,74 @@ function isYouTube(u){
   const h = m ? m[1].toLowerCase().replace(/^.*@/, '').replace(/:\d+$/, '') : '';
   return h === 'youtu.be' || h === 'youtube.com' || h.endsWith('.youtube.com');
 }
+const IS_PHONE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+const FETCH_OK = {{ 'true' if fetch_enabled else 'false' }};
+// Without Reelscut Fetch (or on a phone) the server can't take YouTube links.
+const YT_PHONE_MSG = FETCH_OK
+  ? 'YouTube links need a computer with Reelscut Fetch. On your phone, ' +
+    'upload the video file instead, or paste the Kick or Google Drive link.'
+  : 'YouTube doesn\'t let our servers download videos. Download it on your ' +
+    'device and upload the file, or paste the Kick replay or Google Drive link instead.';
+const YT_FETCH = FETCH_OK && !IS_PHONE;
+const YT_DESKTOP_MSG = 'YouTube videos download on this computer with Reelscut Fetch ' +
+  '(free, Windows) — press Make my reels and we\'ll open it. 18+ videos: sign in to ' +
+  'YouTube in Reelscut Fetch once.';
 if (urlInput) urlInput.addEventListener('input', () => {
   const yt = isYouTube(urlInput.value) && !YT_OK;
-  document.getElementById('ytnote').hidden = !yt;
+  const note = document.getElementById('ytnote');
+  note.hidden = !yt;
+  note.classList.toggle('warn', !YT_FETCH);
+  note.querySelector('use').setAttribute('href', YT_FETCH ? '#i-check' : '#i-alert');
+  note.querySelector('span').textContent = YT_FETCH ? YT_DESKTOP_MSG : YT_PHONE_MSG;
   document.getElementById('linknote').hidden = yt;
 });
+
+// YouTube blocks servers, so the user's computer downloads the video: get a
+// one-time ticket, open the Reelscut Fetch app with it, follow its progress.
+// Resolves like the other start calls: {job_id} once the video is queued.
+async function youtubeFetch(fd){
+  const r = await (await fetch('/fetch/new', {method:'POST', body: fd})).json();
+  if (!r.fetch_id) return r;  // error, or signed out
+  const box = document.getElementById('fetchbox');
+  document.getElementById('fetchopen').href = r.link;
+  document.getElementById('fetchget').href = r.helper_url;
+  box.hidden = false;
+  box.classList.remove('nudge');
+  titleEl.textContent = 'YouTube video';
+  msg.textContent = 'Opening Reelscut Fetch on this computer…';
+  location.href = r.link;  // the browser asks "Open Reelscut Fetch?"
+  const t0 = Date.now();
+  let misses = 0;
+  for (;;) {
+    await new Promise(ok => setTimeout(ok, 1500));
+    let s, st;
+    try { s = await fetch('/status/fetch/' + r.fetch_id); st = await s.json(); }
+    catch (_) {
+      if (++misses > 100) { box.hidden = true; return {error: 'Lost connection to the server. Please try again.'}; }
+      continue;
+    }
+    misses = 0;
+    if (st.login) return st;
+    if (s.status === 404) { box.hidden = true; return {error: st.error}; }
+    if (st.stage === 'error') { box.hidden = true; return {error: st.error}; }
+    if (st.title) titleEl.textContent = st.title;
+    if (st.stage === 'queued' && st.job_id) { box.hidden = true; return {job_id: st.job_id}; }
+    if (st.stage === 'waiting') {
+      const slow = Date.now() - t0 > 8000;
+      box.classList.toggle('nudge', slow);
+      msg.textContent = slow
+        ? 'Waiting for Reelscut Fetch… Don\'t have it yet? Get it below, run it once, then press Open Reelscut Fetch.'
+        : 'Opening Reelscut Fetch on this computer…';
+      if (Date.now() - t0 > 20 * 60 * 1000) { box.hidden = true; return {error: 'Reelscut Fetch didn\'t open. Press Make my reels to try again.'}; }
+      continue;
+    }
+    box.hidden = true;  // the app is running: no need for install help
+    const pct = Math.round(st.pct || 0);
+    fill.style.width = pct + '%';
+    pctEl.textContent = pct + '%';
+    msg.textContent = st.message || 'Reelscut Fetch is working…';
+  }
+}
 
 // ---- Tab switching ----
 let mode = 'upload';
@@ -620,7 +696,6 @@ go.onclick = async () => {
     } else {
       const url = urlInput.value.trim();
       if (!url) { fail('Paste a link first.'); return; }
-      if (isYouTube(url) && !YT_OK) { fail(document.querySelector('#ytnote span').textContent); return; }
       const fd = new FormData();
       const o = opts();
       for (const k in o) fd.append(k, o[k]);
@@ -628,7 +703,12 @@ go.onclick = async () => {
       fd.append('url', url);
       fd.append('start', document.getElementById('start').value.trim());
       fd.append('end', document.getElementById('end').value.trim());
-      res = await (await fetch('/process', {method:'POST', body: fd})).json();
+      if (isYouTube(url) && !YT_OK) {
+        if (!YT_FETCH) { fail(YT_PHONE_MSG); return; }
+        res = await youtubeFetch(fd);
+      } else {
+        res = await (await fetch('/process', {method:'POST', body: fd})).json();
+      }
     }
   } catch (e) {
     fail('Upload had a problem. Please try again — or paste a Kick or Google Drive link instead.');
