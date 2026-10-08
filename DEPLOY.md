@@ -67,7 +67,7 @@ Sign-in and payment both go through **Whop**. Without `WHOP_CLIENT_ID` the app
 runs in **local mode**: no login and no limits, as it always has on your machine.
 
 1. **Whop → Developer → create an app.** Add the redirect URI
-   `https://<your-site>/auth/callback`. Copy the **client id** and create an
+   `https://<your-site>/auth/callback`. Copy the **client id** and **client secret** (OAuth tab), and create a **company**
    **API key** with permission to read members/access.
 2. **Create one Whop product per paid plan**, e.g. *Creator* (300 min/month) and
    *Pro* (1200 min/month). Note each product id (`prod_...`).
@@ -76,6 +76,7 @@ runs in **local mode**: no login and no limits, as it always has on your machine
 | Variable | Example | What it does |
 |---|---|---|
 | `WHOP_CLIENT_ID` | `app_xxx` | Turns on "Sign in with Whop" |
+| `WHOP_CLIENT_SECRET` | from the app's OAuth tab | Required by Whop to finish sign-in |
 | `PUBLIC_URL` | `https://reelscut.app` | Your site address (used for the redirect URI; enables secure cookies) |
 | `WHOP_API_KEY` | `...` | Checks which product each user has bought |
 | `WHOP_PLANS` | `prod_aaa:Creator:300,prod_bbb:Pro:1200` | Product → plan name → minutes per month |

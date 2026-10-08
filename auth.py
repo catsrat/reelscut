@@ -4,6 +4,8 @@ Sign in with Whop (OAuth 2.1 + PKCE).
   WHOP_CLIENT_ID   your Whop app's client id (Developer dashboard).
                    Unset = local mode: no login, a single unlimited "local" user
                    (how the app has always worked on your own machine).
+  WHOP_CLIENT_SECRET  the app's client secret (Whop app → OAuth tab). Whop
+                   rejects the sign-in code exchange without it.
   PUBLIC_URL       this site's address, e.g. https://reelscut.app. Register
                    PUBLIC_URL + "/auth/callback" as the app's redirect URI.
                    Defaults to the address the request came in on.
@@ -131,9 +133,13 @@ def callback():
             "code": code,
             "redirect_uri": _redirect_uri(),
             "client_id": _client_id(),
+            "client_secret": os.environ.get("WHOP_CLIENT_SECRET", "").strip(),
             "code_verifier": oauth["verifier"],
         }, timeout=15)
-        tok.raise_for_status()
+        if tok.status_code >= 400:
+            # Whop's error body says what's wrong (e.g. "client_secret is
+            # required"); it never contains our secret.
+            raise RuntimeError(f"token exchange {tok.status_code}: {tok.text[:300]}")
         access_token = tok.json()["access_token"]
         info = httpx.get(f"{WHOP_OAUTH}/userinfo",
                          headers={"Authorization": f"Bearer {access_token}"},
