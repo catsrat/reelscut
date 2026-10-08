@@ -1004,12 +1004,16 @@ def _get_face_center(video_path, start, end):
 
 CAM_SIZE = 0.30  # facecam box width as a fraction of the source width
 
+# Facecam layout: webcam overlays are 16:9 boxes, so the cam is cropped 16:9 and
+# shown full-width on top (720x405); the game fills the rest below. Cam on top
+# is the streamer-clip norm — TikTok/Reels UI covers the bottom of the screen.
+CAM_PANEL_H = (W * 9 // 16) // 2 * 2  # even: yuv420p needs even heights (404)
 _CAM_CORNER = {
-    # corner -> (x_expr, y_expr) for cropping the facecam box (cw=iw*F, ch=cw*960/1080)
+    # corner -> (x_expr, y_expr) for cropping the facecam box (cw=iw*F, ch=cw*9/16)
     "top-left":     ("0", "0"),
     "top-right":    ("iw-iw*{F}", "0"),
-    "bottom-left":  ("0", "ih-iw*{F}*960/1080"),
-    "bottom-right": ("iw-iw*{F}", "ih-iw*{F}*960/1080"),
+    "bottom-left":  ("0", "ih-iw*{F}*9/16"),
+    "bottom-right": ("iw-iw*{F}", "ih-iw*{F}*9/16"),
 }
 
 
@@ -1024,7 +1028,8 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
 
     split_mode:
       "off"      — normal full-frame vertical.
-      "facecam"  — single source split into game (top) + cropped facecam (bottom).
+      "facecam"  — single source split into the 16:9 corner facecam (top strip)
+                   + the game (rest of the frame below).
       "broll"    — speaker on top, looping b-roll (broll_path) on the bottom.
     Captions sit on the seam in split modes.
 
@@ -1057,7 +1062,12 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
         caps = [(_remap(ds, keeps), _remap(de, keeps), t) for ds, de, t in caps]
         caps = [(a, b, t) for a, b, t in caps if b - a > 0.04]
 
-    cap_center = 0.5 if split else CAPTION_CENTER_Y  # captions on the seam when split
+    if split_mode == "facecam":
+        cap_center = (CAM_PANEL_H + 90) / H  # just under the cam, clear of the face
+    elif split:
+        cap_center = 0.5  # captions on the seam
+    else:
+        cap_center = CAPTION_CENTER_Y
 
     inputs = ["-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", video_path]
 
@@ -1118,22 +1128,23 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     half = (f"scale={W}:{H // 2}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={W}:{H // 2}")
     if split_mode == "facecam":
-        # One source: game -> top, cropped corner cam -> bottom.
+        # One source: 16:9 corner cam -> top strip, game -> everything below.
         x_expr, y_expr = _CAM_CORNER.get(cam_corner, _CAM_CORNER["bottom-right"])
         x_expr = x_expr.format(F=cam_size)
         y_expr = y_expr.format(F=cam_size)
-        cam_crop = f"crop=iw*{cam_size}:iw*{cam_size}*960/1080:{x_expr}:{y_expr}"
-        # For the top (game), crop off the column that holds the cam so the
-        # gamer isn't shown twice. Cam on the left -> keep the right side, etc.
-        if cam_corner in ("top-left", "bottom-left"):
-            game_crop = f"crop=iw*{1 - cam_size}:ih:iw*{cam_size}:0,"
-        else:
-            game_crop = f"crop=iw*{1 - cam_size}:ih:0:0,"
+        cam_crop = f"crop=iw*{cam_size}:iw*{cam_size}*9/16:{x_expr}:{y_expr}"
+        game_h = H - CAM_PANEL_H
+        # Game: the centre of the frame (where the action is). The tall crop
+        # is narrow enough that a corner cam stays out of it.
+        game_fill = (f"scale={W}:{game_h}:force_original_aspect_ratio=increase:"
+                     f"flags=lanczos,crop={W}:{game_h}")
+        cam_fill = (f"scale={W}:{CAM_PANEL_H}:force_original_aspect_ratio=increase:"
+                    f"flags=lanczos,crop={W}:{CAM_PANEL_H}")
         parts = [
             f"{vchain}split=2[g][c]",
-            f"[g]{game_crop}{half}[top]",
-            f"[c]{cam_crop},{half}[bot]",
-            "[top][bot]vstack=inputs=2[base]",
+            f"[c]{cam_crop},{cam_fill}[top]",
+            f"[g]{game_fill}[bot]",
+            "[top][bot]vstack=inputs=2,setsar=1[base]",
         ]
     elif split_mode == "broll":
         # Speaker fills the top half, looping b-roll fills the bottom half.
