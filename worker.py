@@ -149,6 +149,8 @@ def run_job(job):
             min_clip=opts.get("min_clip"),
             max_clip=opts.get("max_clip"),
             on_duration=on_duration,
+            start=opts.get("start"),
+            end=opts.get("end"),
         )
         # If R2 is configured, upload clips and attach durable URLs.
         if storage.enabled():

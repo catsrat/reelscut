@@ -299,23 +299,27 @@ def landing():
     )
 
 
+def _yt_enabled():
+    """YouTube links only work from a server when the owner has configured
+    cookies or a proxy; otherwise they're refused up front with a clear message
+    instead of failing in the queue."""
+    cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+    return bool(
+        (cookies_file and os.path.exists(cookies_file))
+        or os.environ.get("YT_COOKIES_BROWSER", "").strip()
+        or os.environ.get("YTDLP_PROXY", "").strip()
+    )
+
+
 @app.route("/app")
 @auth.login_required
 def index(user):
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
-    # Show the link tab whenever yt-dlp is available: Google Drive links work
-    # with no setup at all (Drive doesn't block servers). YouTube links also
-    # work here, but only reliably when a proxy/cookies are configured —
-    # `yt_enabled` tells the UI whether to advertise YouTube as ready.
-    cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
-    yt_enabled = bool(
-        (cookies_file and os.path.exists(cookies_file))
-        or os.environ.get("YT_COOKIES_BROWSER", "").strip()
-        or os.environ.get("YTDLP_PROXY", "").strip()  # proxy makes links work in cloud
-    )
+    # Show the link tab whenever yt-dlp is available: Kick replays and Google
+    # Drive links work with no setup at all (they don't block servers).
     show_link = pipeline.ytdlp_available()
     return render_template(
-        "index.html", has_key=has_key, show_link=show_link, yt_enabled=yt_enabled,
+        "index.html", has_key=has_key, show_link=show_link, yt_enabled=_yt_enabled(),
         user=user, quota=billing.quota_json(billing.quota(user)),
         accounts=auth.enabled(), max_upload=_size_label(MAX_UPLOAD_BYTES),
     )
@@ -331,14 +335,25 @@ def me(user):
 @app.route("/process", methods=["POST"])
 @auth.login_required
 def process(user):
-    """Process a Google Drive / video link (multipart form, optional logo)."""
+    """Process a video link — Kick/Twitch replay, Google Drive… (multipart
+    form, optional logo, optional From/To to cut part of a long replay)."""
     url = (request.form.get("url") or "").strip()
     if not url:
-        return jsonify({"error": "Please paste a Google Drive link."}), 400
+        return jsonify({"error": "Please paste a link first."}), 400
     # Only real web links — anything else (e.g. "--exec=...") must never
     # reach yt-dlp, where it could be read as a command-line option.
     if not re.fullmatch(r"https?://\S+", url, re.I):
         return jsonify({"error": "Please paste a full link starting with https://"}), 400
+    if pipeline.is_youtube(url) and not _yt_enabled():
+        return jsonify({"error": pipeline.YOUTUBE_BLOCKED_MSG}), 400
+    try:
+        start = pipeline.parse_time(request.form.get("start"))
+        end = pipeline.parse_time(request.form.get("end"))
+    except ValueError:
+        return jsonify({"error": "Write From and To like 1:20:00 (hours:minutes:"
+                                 "seconds) or 80 (minutes)."}), 400
+    if start is not None and end is not None and end <= start + 10:
+        return jsonify({"error": "To must be later than From."}), 400
     refusal = _refuse(user)
     if refusal:
         return jsonify(refusal[0]), refusal[1]
@@ -350,6 +365,7 @@ def process(user):
     opts = _collect_opts(request.form.get)
     opts["url"] = url
     opts["source_file"] = None
+    opts["start"], opts["end"] = start, end
     _attach_logo(workdir, opts)
     return _enqueue(user, job_id, opts)
 
