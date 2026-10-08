@@ -623,31 +623,170 @@ def pick_moments_ai(segments, api_key, max_clips=5, min_clip=None, max_clip=None
     return _sanitize_clips(clips, segments, max_clip=max_clip)
 
 
-def pick_moments_heuristic(segments, max_clips=5):
-    """Fallback when the AI picker is off or unavailable: chunk the transcript
-    into ~TARGET_CLIP windows."""
-    clips = []
+# Words that tend to mark the exciting part of a stream / talk. Only used when
+# there is no AI to read the transcript (no key, out of credits, outage).
+HYPE_WORDS = {
+    "wow", "omg", "crazy", "craziest", "huge", "massive", "holy", "haha",
+    "hahaha", "lol", "million", "thousand", "hundred", "biggest", "let's", "lets",
+    "secret", "never", "shocking",
+}
+# Payoff words: the moment something lands (a win, a reveal) — what a clip
+# should end on. Weighted above general hype.
+PAYOFF_WORDS = {
+    "yes", "won", "win", "winning", "finally", "jackpot", "beautiful", "insane",
+    "unbelievable", "incredible",
+}
+# Big numbers ("22 000", "200,000", "50x", "6k"): money, stats and multipliers
+# are where stream and talk highlights tend to be.
+_BIG_NUMBER = re.compile(r"^\$?\d+(x|k)$|^\$?\d{3,}$|^\$?\d{1,3}(,\d{3})+$")
+
+
+def _loudness_per_second(audio_path, n):
+    """RMS loudness in dB for each second of a 16-bit WAV, or None.
+    Read a second at a time so a long video doesn't load into memory at once."""
+    import wave
+
+    import numpy as np
+    try:
+        with wave.open(audio_path, "rb") as w:
+            if w.getsampwidth() != 2:
+                return None
+            rate, ch = w.getframerate(), w.getnchannels()
+            out = np.zeros(n, dtype=np.float32)
+            got = 0
+            for i in range(n):
+                buf = w.readframes(rate)
+                if not buf:
+                    break
+                x = np.frombuffer(buf, dtype=np.int16)[::ch].astype(np.float32)
+                out[i] = 20 * np.log10(np.sqrt((x * x).mean()) + 1e-6)
+                got = i + 1
+    except Exception:
+        return None
+    if got < 5:
+        return None
+    out[got:] = out[:got].min()
+    return out
+
+
+def _zscore(a):
+    sd = a.std()
+    return (a - a.mean()) / sd if sd > 1e-6 else a * 0
+
+
+def _smooth(a, secs):
+    import numpy as np
+    return np.convolve(a, np.ones(secs) / secs, mode="same")
+
+
+def _auto_title(segments, start, end, peak, lift):
+    """Title from the most exciting line in the clip (most hype / payoff / big
+    numbers, ties broken by closeness to the peak), repeats collapsed:
+    'break break break we got it' -> 'Break we got it'."""
+    inside = [s for s in segments if s["start"] >= start and s["end"] <= end] or segments
+    n = len(lift)
+
+    def excite(s):
+        a, b = max(0, int(s["start"])), min(n, int(s["end"]) + 1)
+        return float(lift[a:b].sum()) if b > a else 0.0
+
+    best = max(inside, key=lambda s: (excite(s), -abs((s["start"] + s["end"]) / 2 - peak)))
+    out = []
+    for w in best["text"].split():
+        if not out or w.lower().strip(".,?!") != out[-1].lower().strip(".,?!"):
+            out.append(w)
+    title = " ".join(out).strip() or "Clip"
+    title = (title[:57] + "...") if len(title) > 60 else title
+    return title[:1].upper() + title[1:]
+
+
+def pick_moments_heuristic(segments, max_clips=5, words=None, audio_path=None,
+                           min_clip=None, max_clip=None):
+    """Pick moments without AI: score every second of the WHOLE video for
+    excitement — loud reactions (vs the video's own average), fast talking,
+    hype words, numbers, repeated shouts — then build a clip around each of
+    the strongest peaks: ~20s of setup before it, the reaction after, cut on
+    phrase boundaries. Not as smart as the AI picker, but finds the
+    high-energy moments a stream clipper is usually after."""
+    import bisect
+
+    import numpy as np
+
+    if not segments:
+        return []
     total = segments[-1]["end"]
-    target = TARGET_CLIP
-    t = 0.0
-    while t < total and len(clips) < max_clips:
-        end = min(t + target, total)
-        if end - t < MIN_CLIP and clips:
+    n = int(total) + 1
+    words = words or []
+
+    score = np.zeros(n, dtype=np.float32)
+    loud = _loudness_per_second(audio_path, n) if audio_path else None
+    if loud is not None:
+        score += np.clip(_zscore(loud), -1.5, 3.0)
+
+    # Weights were tuned on a real 23-minute stream: these settings found its
+    # three biggest moments (a 50x, a $22K win, a $200K near miss) with no AI.
+    # Repeated chanting ("break break break") is deliberately NOT rewarded —
+    # it happens on every spin; the payoff right after it is the highlight.
+    rate = np.zeros(n, dtype=np.float32)
+    lift = np.zeros(n, dtype=np.float32)  # hype + payoff + big numbers
+    toks = [w["text"].strip().lower().strip(".,?!\"'") for w in words]
+    for j, w in enumerate(words):
+        i = min(n - 1, max(0, int(w["start"])))
+        rate[i] += 1
+        tok, raw = toks[j], w["text"]
+        nxt = toks[j + 1] if j + 1 < len(toks) else ""
+        if tok in HYPE_WORDS or "!" in raw:
+            lift[i] += 1.0
+        if tok in PAYOFF_WORDS:
+            lift[i] += 0.75
+        if _BIG_NUMBER.match(tok) or (tok.isdigit() and nxt in ("000", "thousand", "grand", "k")):
+            lift[i] += 1.5
+    if loud is not None:
+        score *= 0.5
+    if words:
+        score += 0.3 * np.clip(_zscore(_smooth(rate, 3)), -1.5, 2.5)
+        score += _smooth(lift, 3)
+    score = _smooth(score, 5)
+
+    lo = float(min_clip) if min_clip else MIN_CLIP
+    hi = float(max_clip) if max_clip else 45.0
+    starts = [s["start"] for s in segments]
+    ends = [s["end"] for s in segments]
+
+    def phrase_start_at_or_before(t):
+        i = bisect.bisect_right(starts, t) - 1
+        return starts[i] if i >= 0 else 0.0
+
+    def phrase_end_at_or_after(t):
+        i = bisect.bisect_left(ends, t)
+        return ends[i] if i < len(ends) else total
+
+    clips, taken = [], []
+    for peak in np.argsort(-score):
+        if len(clips) >= max_clips:
             break
-        # Title from the first words spoken in the window.
-        words = " ".join(
-            s["text"] for s in segments if s["start"] >= t and s["start"] < end
-        )
-        title = (words[:57] + "...") if len(words) > 60 else (words or "Clip")
+        p = float(peak)
+        if any(a - 5 <= p <= b + 5 for a, b in taken):
+            continue
+        start = phrase_start_at_or_before(max(0.0, p - 18))
+        end = phrase_end_at_or_after(min(total, p + 12))
+        if end - start < lo:
+            end = phrase_end_at_or_after(min(total, start + lo))
+        if end - start > hi:  # keep the climax, trim the setup
+            i = bisect.bisect_left(starts, end - hi)
+            start = starts[i] if i < len(starts) and starts[i] < end - lo else end - hi
+        if end - start < min(lo, 5) or any(not (end <= a or start >= b) for a, b in taken):
+            continue
+        taken.append((start, end))
+        title = _auto_title(segments, start, end, p, lift)
         clips.append({
-            "start": t,
+            "start": start,
             "end": end,
-            "title": title.strip(),
-            "reason": "Auto-selected.",
+            "title": title[:1].upper() + title[1:],
+            "reason": "Auto-selected: high-energy moment.",
             "mood": "neutral",
         })
-        t = end
-    return _sanitize_clips(clips, segments)
+    return _sanitize_clips(clips, segments, max_clip=max_clip)
 
 
 def parse_campaign_rules(text, api_key):
@@ -1341,6 +1480,7 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
     # (much faster — handy for just slapping a logo on a finished reel).
     need_transcript = (not full_mode) or captions
     words = []
+    audio = None
     if need_transcript:
         progress(30, "Extracting audio...")
         audio = extract_audio(video, workdir)
@@ -1394,6 +1534,10 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
     else:
         # Scale the number of clips to the video length (~1 per few minutes).
         max_clips = max(3, min(MAX_CLIPS_CAP, round(total / 60 / CLIP_EVERY_MINUTES)))
+
+        def auto_pick():
+            return pick_moments_heuristic(phrases, max_clips, words=words, audio_path=audio,
+                                          min_clip=min_clip, max_clip=max_clip)
         if api_key:
             import anthropic
             progress(68, f"Claude is picking the best moments (up to {max_clips})...")
@@ -1405,13 +1549,13 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
                 # the owner, keep it out of the user's UI, and fall back.
                 print(f"[ai] moment picker failed — using automatic selection: {e}", flush=True)
                 progress(70, "Using automatic moment selection...")
-                clips = pick_moments_heuristic(phrases, max_clips)
+                clips = auto_pick()
             if not clips:
                 progress(70, "Little speech found — using automatic selection...")
-                clips = pick_moments_heuristic(phrases, max_clips)
+                clips = auto_pick()
         else:
             progress(70, "Selecting moments (no AI key — using fallback)...")
-            clips = pick_moments_heuristic(phrases, max_clips)
+            clips = auto_pick()
 
         if not clips:
             raise RuntimeError(
