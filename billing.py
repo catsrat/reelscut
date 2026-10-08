@@ -7,8 +7,9 @@ access to (cached for a few minutes), so cancellations and upgrades apply on
 their own — no webhooks needed.
 
   FREE_MINUTES     video minutes/month without a paid plan (default 30)
-  WHOP_PLANS       paid plans as "prod_id:Name:minutes", comma-separated, e.g.
-                   "prod_abc123:Creator:300,prod_def456:Pro:1200"
+  WHOP_PLANS       paid plans as "prod_id:Name:minutes[:price]", comma-separated,
+                   e.g. "prod_abc123:Creator:300:$19/mo,prod_def456:Pro:1200:$39/mo"
+                   (the price is optional and only shown on the pricing section)
   WHOP_API_KEY     Whop API key (Developer dashboard) used for the access check
   WHOP_STORE_URL   where the "Upgrade" button sends people (your Whop page)
 """
@@ -32,6 +33,7 @@ class Plan:
     name: str
     minutes: float      # monthly quota; 0 with unlimited=True means no cap
     unlimited: bool = False
+    price: str = ""     # display label for the pricing section, e.g. "$19/mo"
 
 
 FREE = Plan("free", "Free", float(os.environ.get("FREE_MINUTES", "30")))
@@ -43,10 +45,11 @@ def paid_plans():
     plans = []
     for item in os.environ.get("WHOP_PLANS", "").split(","):
         parts = [p.strip() for p in item.split(":")]
-        if len(parts) != 3 or not parts[0]:
+        if len(parts) not in (3, 4) or not parts[0]:
             continue
         try:
-            plans.append(Plan(parts[0], parts[1] or parts[0], float(parts[2])))
+            price = parts[3] if len(parts) == 4 else ""
+            plans.append(Plan(parts[0], parts[1] or parts[0], float(parts[2]), price=price))
         except ValueError:
             print(f"[billing] ignoring bad WHOP_PLANS entry: {item!r}", flush=True)
     return sorted(plans, key=lambda p: p.minutes, reverse=True)

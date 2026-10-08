@@ -79,7 +79,7 @@ runs in **local mode**: no login and no limits, as it always has on your machine
 | `WHOP_CLIENT_SECRET` | from the app's OAuth tab | Required by Whop to finish sign-in |
 | `PUBLIC_URL` | `https://reelscut.app` | Your site address (used for the redirect URI; enables secure cookies) |
 | `WHOP_API_KEY` | `...` | Checks which product each user has bought |
-| `WHOP_PLANS` | `prod_aaa:Creator:300,prod_bbb:Pro:1200` | Product → plan name → minutes per month |
+| `WHOP_PLANS` | `prod_aaa:Creator:300:$19/mo,prod_bbb:Pro:1200:$39/mo` | Product → plan name → minutes per month → price label (optional, shown on the landing page's pricing section) |
 | `FREE_MINUTES` | `30` | Free minutes per month for everyone else |
 | `WHOP_STORE_URL` | `https://whop.com/your-store/` | Where the **Upgrade** button goes |
 | `SECRET_KEY` | long random string | Signs login cookies (auto-generated into `data/` if unset) |
