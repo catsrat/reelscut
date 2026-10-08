@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import functools
 import glob
 import time
 
@@ -1202,6 +1203,33 @@ CAM_SIZE = 0.30  # facecam box width as a fraction of the source width
 # shown full-width on top (720x405); the game fills the rest below. Cam on top
 # is the streamer-clip norm — TikTok/Reels UI covers the bottom of the screen.
 CAM_PANEL_H = (W * 9 // 16) // 2 * 2  # even: yuv420p needs even heights (404)
+
+
+def _fill(w, h, x=None):
+    """Filter that fills a w x h box: crop the largest region with the box's
+    aspect ratio FIRST (centred, or at `x`), then scale only that region.
+    Same framing as scale-to-cover + crop, but the expensive Lanczos scaler
+    touches just the kept pixels — cropping a 1920x1080 frame to 9:16 before
+    scaling is ~4x less scaling work than enlarging the whole frame first."""
+    crop = f"crop=w='min(iw,ih*{w}/{h})':h='min(ih,iw*{h}/{w})'"
+    if x is not None:
+        crop += f":x='{x}'"
+    # setsar=1: the crop is rounded to even pixels, so the scale is a hair
+    # off-aspect; keep pixels square instead of tagging an odd aspect ratio.
+    return f"{crop},scale={w}:{h}:flags=lanczos,setsar=1"
+
+
+@functools.lru_cache(maxsize=32)
+def _video_fps(path):
+    """Average frame rate of the first video stream, or 0 if unknown."""
+    try:
+        out = _run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                    "-show_entries", "stream=avg_frame_rate",
+                    "-of", "default=nw=1:nk=1", path]).strip()
+        num, _, den = out.partition("/")
+        return float(num) / float(den or 1)
+    except (RuntimeError, ValueError, ZeroDivisionError, OSError):
+        return 0.0
 _CAM_CORNER = {
     # corner -> (x_expr, y_expr) for cropping the facecam box (cw=iw*F, ch=cw*9/16)
     "top-left":     ("0", "0"),
@@ -1318,11 +1346,15 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     keep_expr = "+".join(f"between(t,{ks:.3f},{ke:.3f})" for ks, ke in keeps)
     # Source video chain (with jump cuts applied if tightening).
     vchain = "[0:v]"
+    # Reels are 30fps. A 60fps source (common for streams) would otherwise run
+    # every filter AND the encoder on twice the frames for no visible gain.
+    # Done first, so everything after (incl. jump cuts) sees 30fps.
+    if _video_fps(video_path) > 30.5:
+        vchain += "fps=30,"
     if tighten:
         vchain += f"select='{keep_expr}',setpts=N/FRAME_RATE/TB,"
 
-    half = (f"scale={W}:{H // 2}:force_original_aspect_ratio=increase:flags=lanczos,"
-            f"crop={W}:{H // 2}")
+    half = _fill(W, H // 2)
     if split_mode == "facecam":
         # One source: 16:9 corner cam -> top strip, game -> everything below.
         x_expr, y_expr = _CAM_CORNER.get(cam_corner, _CAM_CORNER["bottom-right"])
@@ -1332,10 +1364,8 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
         game_h = H - CAM_PANEL_H
         # Game: the centre of the frame (where the action is). The tall crop
         # is narrow enough that a corner cam stays out of it.
-        game_fill = (f"scale={W}:{game_h}:force_original_aspect_ratio=increase:"
-                     f"flags=lanczos,crop={W}:{game_h}")
-        cam_fill = (f"scale={W}:{CAM_PANEL_H}:force_original_aspect_ratio=increase:"
-                    f"flags=lanczos,crop={W}:{CAM_PANEL_H}")
+        game_fill = _fill(W, game_h)
+        cam_fill = _fill(W, CAM_PANEL_H)
         parts = [
             f"{vchain}split=2[g][c]",
             f"[c]{cam_crop},{cam_fill}[top]",
@@ -1352,12 +1382,10 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     else:
         if auto_crop:
             center_x = _get_face_center(video_path, start, end)
-            # Crop 720x1280 centered on the detected face X, and centered vertically
-            crop = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
-                    f"crop={W}:{H}:(iw*{center_x})-({W}/2):(ih-{H})/2")
+            # 9:16 window centred on the detected face (clamped to the frame).
+            crop = _fill(W, H, x=f"max(0,min(iw-ow,iw*{center_x}-ow/2))")
         else:
-            crop = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
-                    f"crop={W}:{H}")
+            crop = _fill(W, H)
         parts = [f"{vchain}{crop}[base]"]
 
     # Viral polish applied to the footage only (captions/logo stay crisp on top):
