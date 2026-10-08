@@ -401,19 +401,20 @@ def transcribe_groq(audio_path, workdir, language="en"):
     spread evenly across each segment instead.
     """
     from groq import Groq
-    client = Groq() # Uses GROQ_API_KEY environment variable
-    # Groq has a 25MB limit. WAV files are large, so we compress to MP3 if needed.
-    file_size = os.path.getsize(audio_path)
-    upload_path = audio_path
-    if file_size > 24 * 1024 * 1024:
-        compressed_path = os.path.join(workdir, "audio_compressed.mp3")
-        _run(["ffmpeg", "-y", "-i", audio_path, "-codec:a", "libmp3lame", "-b:a", "64k", compressed_path])
-        upload_path = compressed_path
+    client = Groq(timeout=300)  # uses GROQ_API_KEY
+    # Always send small speech-grade audio: 16 kHz mono MP3 at 32 kbps is
+    # ~0.24 MB/min (a 23-min video ≈ 5.5 MB vs 44 MB of WAV), so the upload is
+    # quick and even a 100-minute video stays under Groq's 25 MB limit.
+    upload_path = os.path.join(workdir, "audio_groq.mp3")
+    _run(["ffmpeg", "-y", "-i", audio_path, "-ac", "1", "-ar", "16000",
+          "-codec:a", "libmp3lame", "-b:a", "32k", upload_path])
 
     with open(upload_path, "rb") as f:
         transcription = client.audio.transcriptions.create(
             file=(os.path.basename(upload_path), f),
-            model="whisper-large-v3",
+            # Turbo is several times faster and near-identical on English;
+            # keep the full model for other languages.
+            model="whisper-large-v3-turbo" if language == "en" else "whisper-large-v3",
             response_format="verbose_json",
             timestamp_granularities=["word", "segment"],
             language=language if language != "auto" else None,
@@ -1548,38 +1549,50 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
         audio = extract_audio(video, workdir)
 
         prefer_sarvam = os.environ.get("PREFER_SARVAM", "").strip().lower() in ("1", "true", "yes")
-        use_sarvam = bool(sarvam_key) and (language != "en" or prefer_sarvam)
+        groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+        # Fastest engine first, each failure falls through to the next:
+        #  - Groq transcribes a whole video in one call (seconds) — best for English.
+        #  - Sarvam is the accurate engine for Telugu / Hindi / Tamil.
+        #  - Local whisper.cpp is the slow last resort.
+        engines = []
+        if language == "en" and groq_key:
+            engines.append("groq")
+        if sarvam_key and (language != "en" or prefer_sarvam):
+            engines.append("sarvam")
+        for extra in (("groq" if groq_key else None), ("sarvam" if sarvam_key else None), "local"):
+            if extra and extra not in engines:
+                engines.append(extra)
 
-        try:
-            if use_sarvam:
-                progress(45, "Transcribing with Sarvam (Indian-language engine)...")
-                words = transcribe_sarvam(audio, workdir, language, sarvam_key, progress)
-            elif os.environ.get("GROQ_API_KEY"):
-                progress(45, "Transcribing with Groq (Free Cloud AI)...")
-                words = transcribe_groq(audio, workdir, language)
-            else:
-                model_path = MODEL_PATH if language == "en" else MULTILINGUAL_MODEL
-                lang = "en" if language == "en" else language
-                mins = int((dur or 0) / 60)
-                note = "" if lang == "en" else " — non-English local model is slower"
-                est = f"~{mins} min of audio" if mins else "the audio"
-                progress(45, f"Transcribing {est}{note}. This can take a few minutes...")
-                words = transcribe(audio, workdir, model_path, lang)
-        except Exception as e:
-            # If local transcription failed due to system policy and we have a Sarvam key, fallback to it automatically.
-            if not use_sarvam and sarvam_key:
-                progress(45, "Local transcription blocked by system policy. Falling back to Sarvam AI...")
-                try:
+        errors = []
+        for engine in engines:
+            try:
+                if engine == "groq":
+                    progress(45, "Transcribing with Groq (fast cloud engine)...")
+                    words = transcribe_groq(audio, workdir, language)
+                elif engine == "sarvam":
+                    progress(45, "Transcribing with Sarvam (Indian-language engine)...")
                     words = transcribe_sarvam(audio, workdir, language, sarvam_key, progress)
-                except Exception as sarvam_e:
-                    raise RuntimeError(f"Local transcription failed ({e}) AND Sarvam fallback failed ({sarvam_e})")
-            else:
-                msg = str(e)
-                if "Device Guard" in msg or "Application Control" in msg or "WinError 4551" in msg:
-                    msg = (f"{msg}\n\n🚨 SYSTEM POLICY BLOCK: Your Windows Device Guard/Application Control policy "
-                           f"is blocking the local transcription binaries and libraries. "
-                           f"To fix this, please provide a GROQ_API_KEY (Free) or SARVAM_API_KEY in your environment to use cloud transcription.")
-                raise RuntimeError(msg)
+                else:
+                    model_path = MODEL_PATH if language == "en" else MULTILINGUAL_MODEL
+                    lang = "en" if language == "en" else language
+                    mins = int((dur or 0) / 60)
+                    note = "" if lang == "en" else " — non-English local model is slower"
+                    est = f"~{mins} min of audio" if mins else "the audio"
+                    progress(45, f"Transcribing {est}{note}. This can take a few minutes...")
+                    words = transcribe(audio, workdir, model_path, lang)
+            except Exception as e:
+                print(f"[transcribe] {engine} failed: {e}", flush=True)
+                errors.append(f"{engine}: {e}")
+                continue
+            if words:
+                break
+            errors.append(f"{engine}: no speech found")
+        else:
+            msg = "Transcription failed — " + " | ".join(errors)
+            if "Device Guard" in msg or "Application Control" in msg or "WinError 4551" in msg:
+                msg += ("\n\nWindows Application Control is blocking the local transcription "
+                        "binaries. Set GROQ_API_KEY or SARVAM_API_KEY to use cloud transcription.")
+            raise RuntimeError(msg)
     phrases = group_phrases(words)
 
     total = dur or (words[-1]["end"] if words else 0)
