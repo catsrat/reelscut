@@ -622,41 +622,71 @@ function fail(text, upgradeUrl){
   go.disabled = false;
 }
 
-// Chunked upload: send the file in 5MB pieces so big files (200MB+) get past
-// the host's single-request size limit that stalls a normal upload.
+// Chunked upload: big files go up in 8MB pieces (gets past the host's
+// single-request size limit), several at once — over a long distance one
+// connection that waits for each reply wastes most of the bandwidth.
+const UPLOAD_CHUNK = 8 * 1024 * 1024;
+const UPLOAD_PARALLEL = 4;
+
+function fmtEta(secs){
+  if (!isFinite(secs) || secs <= 0) return '';
+  if (secs < 60) return ' · ' + Math.ceil(secs) + 's left';
+  return ' · about ' + Math.ceil(secs / 60) + ' min left';
+}
+
 async function chunkedUpload(file, o, logoFile){
-  const CHUNK = 5 * 1024 * 1024;
   const sfd = new FormData();
   sfd.append('size', file.size);
   const start = await (await fetch('/upload_start', {method:'POST', body: sfd})).json();
   if (!start.upload_id) return start;  // e.g. busy / file too large
   const uid = start.upload_id;
-  const total = Math.ceil(file.size / CHUNK) || 1;
-  for (let i = 0; i < total; i++){
-    const blob = file.slice(i * CHUNK, (i + 1) * CHUNK);
+  const total = Math.ceil(file.size / UPLOAD_CHUNK) || 1;
+  const t0 = performance.now();
+  let next = 0, sent = 0, refused = null, failed = null;
+
+  async function sendPiece(i){
+    const blob = file.slice(i * UPLOAD_CHUNK, (i + 1) * UPLOAD_CHUNK);
     const fd = new FormData();
     fd.append('upload_id', uid);
-    fd.append('offset', i * CHUNK);  // lets the server ignore a retried chunk it already has
+    fd.append('offset', i * UPLOAD_CHUNK);  // pieces land at their own spot, in any order
     fd.append('chunk', blob);
-    let ok = false;
-    for (let attempt = 0; attempt < 4 && !ok; attempt++){
+    for (let attempt = 0; attempt < 5; attempt++){
       let r = null;
-      try { r = await fetch('/upload_chunk', {method:'POST', body: fd}); ok = r.ok; }
-      catch (_) { ok = false; }
+      try { r = await fetch('/upload_chunk', {method:'POST', body: fd}); }
+      catch (_) { r = null; }
+      if (r && r.ok) return blob.size;
       // 4xx = the server refused it (too large, expired) — retrying won't help.
       if (r && r.status >= 400 && r.status < 500) {
         let err = 'Upload was refused. Please try again.';
         try { err = (await r.json()).error || err; } catch (_) {}
-        return {error: err};
+        throw {refused: err};
       }
-      if (!ok) await new Promise(r => setTimeout(r, 800));  // brief retry
+      await new Promise(res => setTimeout(res, 800 * (attempt + 1)));  // back off, retry
     }
-    if (!ok) throw new Error('chunk_failed');
-    const pc = Math.round((i + 1) / total * 100);
-    fill.style.width = pc + '%';
-    pctEl.textContent = pc + '%';
-    msg.textContent = pc < 100 ? 'Uploading file... ' + pc + '%' : 'Upload done — starting...';
+    throw new Error('chunk_failed');
   }
+
+  async function lane(){
+    while (!refused && !failed && next < total){
+      const i = next++;
+      let got;
+      try { got = await sendPiece(i); }
+      catch (e) { if (e && e.refused) refused = e.refused; else failed = e; return; }
+      sent += got;  // after the await: `sent += await …` would read a stale total across lanes
+      const pc = Math.round(sent / file.size * 100);
+      const secs = (performance.now() - t0) / 1000;
+      const rate = sent / Math.max(secs, 0.001);  // bytes per second
+      fill.style.width = pc + '%';
+      pctEl.textContent = pc + '%';
+      msg.textContent = pc < 100
+        ? 'Uploading… ' + pc + '% · ' + humanSize(rate) + '/s' + fmtEta((file.size - sent) / rate)
+        : 'Upload done — starting...';
+    }
+  }
+  await Promise.all(Array.from({length: Math.min(UPLOAD_PARALLEL, total)}, lane));
+  if (refused) return {error: refused};
+  if (failed) throw failed;
+
   const fd = new FormData();
   fd.append('upload_id', uid);
   fd.append('filename', file.name);
