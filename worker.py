@@ -100,8 +100,9 @@ def run_job(job):
             try:
                 req = pipeline.parse_campaign_rules(rules_text, api_key)
                 compliance = _apply_rules(req, opts)
-            except Exception:
-                pass  # rules parsing is best-effort; never block the clip
+            except Exception as e:
+                # best-effort: never block the clip, but tell the owner why
+                print(f"[ai] campaign rules not read: {e}", flush=True)
 
         results = pipeline.run_pipeline(
             opts.get("url"), workdir, api_key, progress,
