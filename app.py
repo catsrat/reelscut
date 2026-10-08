@@ -109,9 +109,10 @@ def _collect_opts(get):
         "music_volume": {"soft": 0.2, "medium": 0.4, "loud": 0.65}.get(
             (get("music_volume") or "medium").strip(), 0.4),
         "split_mode": (get("split_mode") or "off").strip(),
-        "cam_corner": (get("cam_corner") or "bottom-right").strip(),
-        "cam_size": {"small": 0.18, "medium": 0.28, "large": 0.4}.get(
-            (get("cam_size") or "medium").strip(), 0.28),
+        # "auto" = detect the webcam box in the video (pipeline.detect_facecam)
+        "cam_corner": (get("cam_corner") or "auto").strip(),
+        "cam_size": {"small": 0.18, "medium": 0.28, "large": 0.4, "auto": "auto"}.get(
+            (get("cam_size") or "auto").strip(), "auto"),
         "logo_scale": {"small": 0.12, "medium": 0.20, "large": 0.32,
                        "xlarge": 0.45}.get(
             (get("logo_size") or "medium").strip(), 0.20),
