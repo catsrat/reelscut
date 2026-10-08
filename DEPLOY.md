@@ -24,8 +24,11 @@ This covers **Phase 2: deploy the worker** (the engine) to Render. Later phases
 3. Render auto-detects the `Dockerfile`. Settings:
    - **Instance type:** start with **Standard** (the free/starter tier has too
      little RAM/CPU for video + whisper). ~$7–25/mo.
-   - **Disk:** add a small persistent disk (e.g. 10 GB) mounted at `/app/jobs`
-     so clips survive (until we move to R2 in Phase 3).
+   - **Disk:** add a small persistent disk (e.g. 1–10 GB) mounted at `/app/data`.
+     It holds the SQLite database (accounts, job queue, minutes used). Without
+     it, every redeploy forgets who used how many minutes. Rendered clips in
+     `/app/jobs` are temporary (deleted after `JOB_TTL_HOURS`); set up R2
+     (Phase 3) so the clips themselves survive.
 4. **Environment variables** (Settings → Environment):
    - `ANTHROPIC_API_KEY` = your key
    - `SARVAM_API_KEY` = your key
@@ -46,9 +49,39 @@ This covers **Phase 2: deploy the worker** (the engine) to Render. Later phases
 | Render service | create + set env vars | fix Dockerfile/build issues |
 | Phase 3: R2 storage | create Cloudflare R2 + keys | wire it into the app |
 | Phase 4: Vercel frontend | create account | build the Next.js page |
-| Phase 5: accounts + payments | create Clerk + Stripe/Razorpay | wire them in |
+| Phase 5: accounts + payments | create the Whop app + products | ✅ done (Whop) |
 
 ## Honest note
 The free tiers won't run this (video + whisper need real RAM/CPU). Budget
 **~$7–25/mo** for the worker once you're past testing. Don't pay for the bigger
 phases until the worker is live and you've shown it to a few creators.
+
+## Accounts, plans & payments (Whop)
+Sign-in and payment both go through **Whop**. Without `WHOP_CLIENT_ID` the app
+runs in **local mode**: no login and no limits, as it always has on your machine.
+
+1. **Whop → Developer → create an app.** Add the redirect URI
+   `https://<your-site>/auth/callback`. Copy the **client id** and create an
+   **API key** with permission to read members/access.
+2. **Create one Whop product per paid plan**, e.g. *Creator* (300 min/month) and
+   *Pro* (1200 min/month). Note each product id (`prod_...`).
+3. **Environment variables:**
+
+| Variable | Example | What it does |
+|---|---|---|
+| `WHOP_CLIENT_ID` | `app_xxx` | Turns on "Sign in with Whop" |
+| `PUBLIC_URL` | `https://reelscut.app` | Your site address (used for the redirect URI; enables secure cookies) |
+| `WHOP_API_KEY` | `...` | Checks which product each user has bought |
+| `WHOP_PLANS` | `prod_aaa:Creator:300,prod_bbb:Pro:1200` | Product → plan name → minutes per month |
+| `FREE_MINUTES` | `30` | Free minutes per month for everyone else |
+| `WHOP_STORE_URL` | `https://whop.com/your-store/` | Where the **Upgrade** button goes |
+| `SECRET_KEY` | long random string | Signs login cookies (auto-generated into `data/` if unset) |
+
+**How it works:**
+- **Charging.** Usage is counted in source-video minutes, per calendar month (UTC). A video is only charged when it finishes successfully.
+- **Plan checks.** The user's plan is checked with Whop at most every 10 minutes and again right before each video, so upgrades and cancellations take effect without webhooks. If Whop is unreachable, the last known plan is kept.
+- **Queue.** Each user can have one video in the queue at a time. The queue holds at most `MAX_QUEUE` jobs (default 20).
+- **Worker.** The job worker (`python worker.py`) runs beside the web server. The Dockerfile starts both, and `python app.py` runs a worker in-process for local use.
+
+**Other limits** (optional): `MAX_UPLOAD_MB` (2048), `JOB_TTL_HOURS` (24, `0` = keep forever),
+`MAX_PENDING_UPLOADS` (3), `MIN_FREE_GB` (5).
