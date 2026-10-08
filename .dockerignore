@@ -12,3 +12,7 @@ bin/
 
 # SQLite database (users, jobs, usage) + session key
 data/
+
+# Windows helper app, built separately
+fetch/
+.github/

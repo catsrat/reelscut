@@ -1,0 +1,39 @@
+# Builds Reelscut Fetch (the Windows helper that downloads YouTube videos on the
+# user's computer) and publishes it as the `fetch-latest` release, which the
+# app links to: /releases/download/fetch-latest/ReelscutFetch.exe
+name: Reelscut Fetch
+
+# Run by hand (Actions → Reelscut Fetch → Run workflow) for now: an unsigned
+# build gets blocked by Windows Defender, so add code signing before turning on
+# FETCH_ENABLED — then switch this to run on every push to main.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        shell: pwsh
+        run: ./fetch/build.ps1
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $exe = "fetch/dist/ReelscutFetch.exe"
+          gh release view fetch-latest *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create fetch-latest $exe --title "Reelscut Fetch" --latest=false `
+              --notes "Windows helper that downloads YouTube videos on your computer and sends them to Reelscut. Built from $env:GITHUB_SHA."
+          } else {
+            gh release upload fetch-latest $exe --clobber
+            gh release edit fetch-latest --notes "Windows helper that downloads YouTube videos on your computer and sends them to Reelscut. Built from $env:GITHUB_SHA."
+          }

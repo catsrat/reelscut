@@ -12,3 +12,9 @@ bin/
 
 # SQLite database (users, jobs, usage) + session key
 data/
+
+# Reelscut Fetch build output (GitHub Actions publishes the .exe)
+fetch/.venv-build/
+fetch/build/
+fetch/dist/
+fetch/*.spec
