@@ -118,6 +118,11 @@
   textarea{resize:vertical;line-height:1.55;min-height:96px}
   .note{font-size:13px;color:var(--text-3);margin:10px 0 0;display:flex;gap:7px;align-items:flex-start}
   .note svg.i{width:15px;height:15px;margin-top:2px;color:var(--ok)}
+  .note[hidden]{display:none}
+  .note.warn{color:var(--warn)}
+  .note.warn svg.i{color:var(--warn)}
+  .two.range{margin-top:2px;grid-template-columns:1fr 1fr}
+  .lbl .opt{font-weight:400;color:var(--text-3);margin-left:4px}
 
   /* mode choice cards */
   .choices{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -278,7 +283,7 @@
       {% if show_link %}
       <div class="seg" role="tablist">
         <button type="button" class="active" id="tab-upload"><svg class="i"><use href="#i-upload"/></svg>Upload</button>
-        <button type="button" id="tab-link"><svg class="i"><use href="#i-link"/></svg>Google Drive link</button>
+        <button type="button" id="tab-link"><svg class="i"><use href="#i-link"/></svg>Paste a link</button>
       </div>
       {% endif %}
 
@@ -300,8 +305,16 @@
 
       {% if show_link %}
       <div id="pane-link" style="display:none">
-        <input id="url" type="text" placeholder="https://drive.google.com/file/d/…">
-        <p class="note"><svg class="i"><use href="#i-check"/></svg>Share the file as “Anyone with the link”, then paste it here.</p>
+        <input id="url" type="text" inputmode="url" autocomplete="off" placeholder="Kick replay or Google Drive link">
+        <p class="note" id="linknote"><svg class="i"><use href="#i-check"/></svg><span>Kick and Twitch replays work as they are. Google Drive files must be shared as “Anyone with the link”.</span></p>
+        <p class="note warn" id="ytnote" hidden><svg class="i"><use href="#i-alert"/></svg><span>YouTube doesn't let our servers download videos. Download it on your device and upload the file, or paste the Kick replay or Google Drive link instead.</span></p>
+        <div class="two range">
+          <div><label class="lbl" for="start">From <span class="opt">optional</span></label>
+            <input id="start" type="text" inputmode="numeric" autocomplete="off" placeholder="1:20:00"></div>
+          <div><label class="lbl" for="end">To <span class="opt">optional</span></label>
+            <input id="end" type="text" inputmode="numeric" autocomplete="off" placeholder="2:50:00"></div>
+        </div>
+        <p class="note"><svg class="i"><use href="#i-check"/></svg><span>Long replay? Pick the part to cut, up to 100 minutes. Only that part is downloaded and counted.</span></p>
       </div>
       {% endif %}
     </div>
@@ -538,6 +551,19 @@ const musicBox = document.getElementById('music');
 const musicFields = document.getElementById('musicFields');
 musicBox.addEventListener('change', () => { musicFields.hidden = !musicBox.checked; });
 
+// ---- Link box: spot YouTube links right away ----
+const YT_OK = {{ 'true' if yt_enabled else 'false' }};
+function isYouTube(u){
+  const m = /^\s*(?:https?:\/\/)?([^\/?#]+)/i.exec(u || '');
+  const h = m ? m[1].toLowerCase().replace(/^.*@/, '').replace(/:\d+$/, '') : '';
+  return h === 'youtu.be' || h === 'youtube.com' || h.endsWith('.youtube.com');
+}
+if (urlInput) urlInput.addEventListener('input', () => {
+  const yt = isYouTube(urlInput.value) && !YT_OK;
+  document.getElementById('ytnote').hidden = !yt;
+  document.getElementById('linknote').hidden = yt;
+});
+
 // ---- Tab switching ----
 let mode = 'upload';
 const tabUpload = document.getElementById('tab-upload');
@@ -593,16 +619,19 @@ go.onclick = async () => {
       res = await chunkedUpload(file, opts(), logoFile);
     } else {
       const url = urlInput.value.trim();
-      if (!url) { fail('Paste a Google Drive link first.'); return; }
+      if (!url) { fail('Paste a link first.'); return; }
+      if (isYouTube(url) && !YT_OK) { fail(document.querySelector('#ytnote span').textContent); return; }
       const fd = new FormData();
       const o = opts();
       for (const k in o) fd.append(k, o[k]);
       if (logoFile) fd.append('logo', logoFile);
       fd.append('url', url);
+      fd.append('start', document.getElementById('start').value.trim());
+      fd.append('end', document.getElementById('end').value.trim());
       res = await (await fetch('/process', {method:'POST', body: fd})).json();
     }
   } catch (e) {
-    fail('Upload had a problem. Please try again — or paste a Google Drive link instead.');
+    fail('Upload had a problem. Please try again — or paste a Kick or Google Drive link instead.');
     return;
   }
 

@@ -76,6 +76,46 @@ def _is_gdrive(url):
     return "drive.google.com" in u or "docs.google.com" in u
 
 
+def _host(url):
+    m = re.match(r"https?://([^/?#]+)", (url or "").strip(), re.I)
+    return m.group(1).lower().split("@")[-1].split(":")[0] if m else ""
+
+
+def is_youtube(url):
+    """YouTube blocks downloads from servers, so these need a proxy/cookies."""
+    h = _host(url)
+    return h == "youtu.be" or h == "youtube.com" or h.endswith(".youtube.com")
+
+
+YOUTUBE_BLOCKED_MSG = (
+    "YouTube doesn't let our servers download videos. Download it on your "
+    "device and upload the file here, or paste the Kick replay or Google "
+    "Drive link instead."
+)
+
+
+def parse_time(text):
+    """"1:20:00", "80:00" or "80" (minutes) -> seconds; "" -> None.
+    Raises ValueError for anything else."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(\.\d+)?", text):
+        return float(text) * 60
+    m = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{1,2}(?:\.\d+)?)", text)
+    if not m:
+        raise ValueError(text)
+    h, mnt, s = int(m.group(1) or 0), int(m.group(2)), float(m.group(3))
+    if (m.group(1) and mnt >= 60) or s >= 60:
+        raise ValueError(text)
+    return h * 3600 + mnt * 60 + s
+
+
+def _hms(secs):
+    secs = int(secs)
+    return f"{secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d}"
+
+
 def _tool(name):
     """Resolve an external tool: PATH first (Docker/Linux/Mac, or a Windows
     install), then the bundled Windows binaries in bin/."""
@@ -211,6 +251,22 @@ def get_duration(url):
         return None
 
 
+def _trim(video, workdir, start=None, end=None):
+    """Keep only start..end (seconds) of a local file, without re-encoding."""
+    out = os.path.join(workdir, "source_part.mp4")
+    cmd = ["ffmpeg", "-y", "-v", "error"]
+    if start:
+        cmd += ["-ss", f"{start:.3f}"]
+    cmd += ["-i", video]
+    if end is not None:
+        cmd += ["-t", f"{end - (start or 0):.3f}"]
+    cmd += ["-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+            "-avoid_negative_ts", "make_zero", out]
+    _run(cmd, timeout=900)
+    os.remove(video)  # the whole file isn't needed any more
+    return out
+
+
 def _probe_duration(path):
     """Duration of a local media file in seconds, or None."""
     try:
@@ -223,12 +279,14 @@ def _probe_duration(path):
         return None
 
 
-def download_video(url, workdir):
+def download_video(url, workdir, start=None, end=None):
     """Download the video as an mp4 into workdir, return its path.
 
     Caps at 1080p: a vertical 9:16 crop only keeps the centre ~600px of a
     landscape frame, so 720p sources looked soft after upscaling to 1080-wide.
     Retries and parallel fragments make flaky connections less fatal.
+    `start`/`end` (seconds) download only that part — for hours-long stream
+    replays (Kick, Twitch); the file then starts at 0.
     """
     out_tmpl = os.path.join(workdir, "source.%(ext)s")
     bin_to_use = ytdlp_cmd()
@@ -272,6 +330,9 @@ def download_video(url, workdir):
             "--socket-timeout", "60",
             "-o", out_tmpl,
         ]
+        if start is not None or end is not None:
+            cmd += ["--download-sections",
+                    f"*{_hms(start or 0)}-{_hms(end) if end is not None else 'inf'}"]
         # YouTube increasingly blocks anonymous downloads ("confirm you're not a
         # bot"). Cookies get past it:
         #  - local dev: YT_COOKIES_BROWSER=chrome (borrow the logged-in browser)
@@ -292,15 +353,27 @@ def download_video(url, workdir):
             cmd += ["--cookies-from-browser", browser]
         cmd += ["--", url]  # "--": a link can never be read as a yt-dlp option
         try:
-            _run(cmd, timeout=900)
+            # A 100-minute slice of a stream replay can take a while to fetch.
+            _run(cmd, timeout=1800)
         except RuntimeError as e:
-            msg = str(e).lower()
-            if "confirm you" in msg or "bot" in msg or "format is not available" in msg:
+            # Match on yt-dlp's output only: the first line echoes the command,
+            # and a link's own text (e.g. an id containing "404") must not count.
+            msg = str(e).split("\n", 1)[-1].lower()
+            if is_youtube(url):
+                # Bot check, age gate or missing formats: all mean the server
+                # can't fetch it. Never show proxy/env setup to customers.
+                print(f"[download] youtube refused: {_redact(str(e))[-300:]}", flush=True)
+                raise RuntimeError(YOUTUBE_BLOCKED_MSG)
+            if "unsupported url" in msg:
                 raise RuntimeError(
-                    "YouTube blocked this download from the server. A residential "
-                    "proxy is required — set YTDLP_PROXY (http://user:pass@host:port) "
-                    "in the environment. (Or upload the file, or paste a Google "
-                    "Drive link instead — Drive needs no proxy.)"
+                    "We can't read videos from that site. Paste a Kick, Twitch or "
+                    "Google Drive link, or upload the file."
+                )
+            if any(k in msg for k in ("403", "forbidden", "private", "subscriber",
+                                      "not available", "does not exist", "404")):
+                raise RuntimeError(
+                    "Couldn't download this link — make sure the replay is public "
+                    "(not subscriber-only or deleted), or upload the file instead."
                 )
             raise
     matches = glob.glob(os.path.join(workdir, "source.*"))
@@ -1637,9 +1710,12 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
                  logo_corner="top-right", clip_mode="moments", captions=True,
                  punchy=False, punch_zoom=False, color_pop=False,
                  auto_crop=False,
-                 min_clip=None, max_clip=None, on_duration=None):
+                 min_clip=None, max_clip=None, on_duration=None,
+                 start=None, end=None):
     """
     Full run. `progress(pct, message)` is called to report status.
+    `start`/`end` (seconds, links only) cut just that part of a long replay;
+    the length cap and the quota apply to that part.
     `language` is "en" (fast local English model), or a code like "te"/"hi"/"ta"
     /"auto". For non-English, Sarvam is used when `sarvam_key` is set (accurate
     Indian languages); otherwise it falls back to the local multilingual model.
@@ -1663,24 +1739,50 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
         video = os.path.abspath(source_file)
         dur = _probe_duration(video)
     else:
-        dur = get_duration(url)
+        if start is None and end is None:
+            dur = get_duration(url)
+        else:
+            full = get_duration(url)
+            if full and (start or 0) >= full:
+                raise RuntimeError(
+                    f"This video is only {_hms(full)} long — pick a start time "
+                    "inside it."
+                )
+            stop = min(end, full) if (end is not None and full) else (end or full)
+            dur = stop - (start or 0) if stop else None
     if dur and dur > MAX_VIDEO_MINUTES * 60:
-        mins = int(dur // 60)
+        if source_file:
+            raise RuntimeError(
+                f"This video is {int(dur // 60)} minutes long. Reelscut handles "
+                f"up to {MAX_VIDEO_MINUTES} minutes at a time — trim it, or "
+                "paste its link and pick the part to cut."
+            )
+        whole = start is None and end is None
         raise RuntimeError(
-            f"This video is {mins} minutes long. For now Clip Reels handles "
-            f"videos up to {MAX_VIDEO_MINUTES} minutes — try a shorter video, "
-            "or a single segment of this one."
+            (f"This video is {_hms(dur)} long. " if whole else
+             f"That part is {int(dur // 60)} minutes long. ") +
+            f"Reelscut cuts up to {MAX_VIDEO_MINUTES} minutes at a time — set "
+            "From and To to the part you want (for example 1:20:00 to 2:50:00)."
         )
     if dur and on_duration:
         on_duration(dur)
 
     if not source_file:
         progress(5, "Downloading video...")
-        video = download_video(url, workdir)
+        video = download_video(url, workdir, start=start, end=end)
+        if _is_gdrive(url) and (start is not None or end is not None):
+            # Drive hands over the whole file; keep just the chosen part.
+            video = _trim(video, workdir, start, end)
         # Drive (and some sources) don't report duration up front — probe the
         # downloaded file so the length cap and clip count still work.
         if not dur:
             dur = _probe_duration(video)
+            if dur and dur > MAX_VIDEO_MINUTES * 60 + 5:
+                raise RuntimeError(
+                    f"This video is {int(dur // 60)} minutes long. Reelscut cuts "
+                    f"up to {MAX_VIDEO_MINUTES} minutes at a time — set From and "
+                    "To to the part you want."
+                )
             if dur and on_duration:
                 on_duration(dur)
 
