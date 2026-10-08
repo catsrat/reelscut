@@ -31,6 +31,8 @@ services:
         sync: false
       - key: WHOP_CLIENT_ID
         sync: false
+      - key: WHOP_CLIENT_SECRET
+        sync: false
       - key: WHOP_API_KEY
         sync: false
       - key: WHOP_PLANS        # e.g. prod_aaa:Creator:300,prod_bbb:Pro:1200
