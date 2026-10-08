@@ -60,6 +60,32 @@ def _apply_rules(req, opts):
     }
 
 
+PERSIST_MIN_FREE = 300 * 1024 * 1024  # leave this much room on the disk
+
+
+def persist_clips(job_id, workdir, results):
+    """Move finished reels onto the persistent disk (db.CLIPS_DIR) so a restart
+    or redeploy can't delete them. The source video and scratch files stay in
+    the temporary job folder (cleaned up by the janitor). If the disk is
+    nearly full the reels just stay where they are — still downloadable until
+    the next restart, and the janitor frees space for the next job."""
+    import shutil
+
+    dest = os.path.join(db.CLIPS_DIR, job_id)
+    files = [r["file"] for r in results if os.path.exists(os.path.join(workdir, r["file"]))]
+    try:
+        need = sum(os.path.getsize(os.path.join(workdir, f)) for f in files)
+        os.makedirs(dest, exist_ok=True)
+        if shutil.disk_usage(dest).free - need < PERSIST_MIN_FREE:
+            print(f"[{job_id}] persistent disk nearly full — reels kept in the temporary folder",
+                  flush=True)
+            return
+        for f in files:
+            shutil.move(os.path.join(workdir, f), os.path.join(dest, f))
+    except OSError as e:
+        print(f"[{job_id}] could not save reels to the disk: {e}", flush=True)
+
+
 def run_job(job):
     job_id = job["id"]
     opts = json.loads(job["opts"])
@@ -132,6 +158,7 @@ def run_job(job):
                 )
                 if url:
                     r["url"] = url
+        persist_clips(job_id, workdir, results)
         db.finish(job_id, {"clips": results, "compliance": compliance,
                            "ai": bool(api_key)}, charged["minutes"])
     except Exception as e:  # surface the real error to the UI

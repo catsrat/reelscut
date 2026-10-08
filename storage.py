@@ -47,8 +47,15 @@ def upload_and_url(local_path, key):
             ExtraArgs={"ContentType": "video/mp4"},
         )
         return client.generate_presigned_url(
-            "get_object", Params={"Bucket": bucket, "Key": key},
+            "get_object",
+            Params={"Bucket": bucket, "Key": key,
+                    # make the link download the file instead of opening it
+                    "ResponseContentDisposition":
+                        f'attachment; filename="{os.path.basename(key)}"'},
             ExpiresIn=_LINK_TTL,
         )
-    except Exception:
-        return None  # never let a storage hiccup break the job
+    except Exception as e:
+        # never let a storage hiccup break the job — but say so in the logs,
+        # or a broken R2 setup goes unnoticed (reels then live on our disk)
+        print(f"[r2] upload failed for {key}: {e}", flush=True)
+        return None
