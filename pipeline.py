@@ -344,8 +344,8 @@ def transcribe(audio_path, workdir, model_path=MODEL_PATH, language="en"):
 
 def transcribe_groq(audio_path, workdir, language="en"):
     """Transcribe via Groq (free tier, high speed). Returns word list.
-    Note: Groq's Whisper API currently provides segment-level timestamps.
-    We distribute words evenly within segments for captioning.
+    Asks for word-level timestamps; if a response only has segments, words are
+    spread evenly across each segment instead.
     """
     from groq import Groq
     client = Groq() # Uses GROQ_API_KEY environment variable
@@ -362,21 +362,33 @@ def transcribe_groq(audio_path, workdir, language="en"):
             file=(os.path.basename(upload_path), f),
             model="whisper-large-v3",
             response_format="verbose_json",
+            timestamp_granularities=["word", "segment"],
             language=language if language != "auto" else None,
         )
 
-    words = []
-    for segment in transcription.segments:
-        start = segment.start
-        end = segment.end
-        text = segment.text.strip()
-        if not text:
-            continue
+    # The SDK returns segments/words as plain dicts (not attribute objects).
+    def get(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
 
+    words = [
+        {"start": float(get(w, "start")), "end": float(get(w, "end")),
+         "text": (get(w, "word") or "").strip()}
+        for w in (get(transcription, "words") or [])
+    ]
+    words = [w for w in words if w["text"]]
+    if words:
+        return words
+
+    for segment in get(transcription, "segments") or []:
+        start = float(get(segment, "start"))
+        end = float(get(segment, "end"))
+        toks = (get(segment, "text") or "").split()
+        if not toks:
+            continue
         # Distribute words evenly across the segment duration
-        toks = text.split()
-        dur = end - start
-        per_word = dur / len(toks)
+        per_word = (end - start) / len(toks)
         for i, tok in enumerate(toks):
             words.append({
                 "start": start + (i * per_word),
