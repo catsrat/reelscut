@@ -220,6 +220,97 @@ def _run_ffmpeg(cmd, cwd=None, expected=None, on_progress=None):
 
 # ---------------------------------------------------------------- download
 
+# A download that stops moving is stuck (a blocked or hung connection); a slow
+# one keeps adding bytes. Stuck ones fail in minutes instead of half an hour.
+DOWNLOAD_STALL_SECS = int(os.environ.get("DOWNLOAD_STALL_SECS", "180"))
+# yt-dlp prints this for each progress update (with --progress-template).
+_PROGRESS_TEMPLATE = ("download:RCPROG %(progress.downloaded_bytes)s "
+                      "%(progress.total_bytes)s %(progress.total_bytes_estimate)s")
+
+
+class DownloadStalled(RuntimeError):
+    pass
+
+
+def _dir_bytes(path):
+    total = 0
+    for entry in os.scandir(path):
+        try:
+            if entry.is_file():
+                # getsize, not entry.stat(): on Windows a listing doesn't see a
+                # file grow while it's still open for writing
+                total += os.path.getsize(entry.path)
+        except OSError:
+            pass
+    return total
+
+
+def _run_download(cmd, workdir, on_progress=None, timeout=1800):
+    """Run yt-dlp with live output: its messages go to the log (so a failed or
+    stuck download says why), `on_progress(fraction or None, megabytes)` gets
+    called every few seconds, and a watchdog kills it once neither its output
+    nor the files in workdir have moved for DOWNLOAD_STALL_SECS."""
+    import collections
+    import threading
+
+    cmd = [str(c) for c in cmd]
+    cmd[0] = _tool(cmd[0])
+    tail = collections.deque(maxlen=40)
+    state = {"moved": time.time(), "frac": None, "logged": 0}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            stdin=subprocess.DEVNULL, text=True, errors="replace")
+
+    def reader():
+        for line in proc.stdout:  # text mode also splits ffmpeg's \r updates
+            line = line.strip()
+            if not line:
+                continue
+            state["moved"] = time.time()
+            m = re.match(r"RCPROG (\d+) (\S+) (\S+)", line)
+            if m:
+                total = next((float(x) for x in m.group(2, 3) if x not in ("NA", "None")), 0)
+                if total:
+                    state["frac"] = min(float(m.group(1)) / total, 1.0)
+                continue
+            tail.append(line)
+            # Log enough to see what happened, not ffmpeg's ticker or its
+            # pages of stream metadata; errors and warnings always.
+            if line.startswith(("frame=", "size=")):
+                continue
+            state["logged"] += 1
+            if state["logged"] <= 60 or re.search(r"error|warning", line, re.I):
+                print(f"[download] {_redact(line)[:300]}", flush=True)
+
+    reading = threading.Thread(target=reader, daemon=True)
+    reading.start()
+    started, size, reported = time.time(), -1, 0.0
+    try:
+        while proc.poll() is None:
+            time.sleep(2)
+            now = time.time()
+            cur = _dir_bytes(workdir)
+            if cur != size:
+                size, state["moved"] = cur, now
+            if on_progress and now - reported >= 3:
+                reported = now
+                on_progress(state["frac"], cur / 1e6)
+            if now - state["moved"] > DOWNLOAD_STALL_SECS:
+                print(f"[download] stalled for {DOWNLOAD_STALL_SECS}s, stopping", flush=True)
+                waited = (f"{DOWNLOAD_STALL_SECS // 60} minutes" if DOWNLOAD_STALL_SECS >= 120
+                          else f"{DOWNLOAD_STALL_SECS} seconds")
+                raise DownloadStalled(
+                    f"The download stopped moving for {waited} — the site may be blocking "
+                    "our server. Try again later, or upload the file.")
+            if now - started > timeout:
+                raise RuntimeError(f"Timed out after {timeout}s: download")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    reading.join(5)
+    if proc.returncode != 0:
+        raise RuntimeError(_redact(f"Command failed: {' '.join(cmd)}\n" + "\n".join(tail)))
+
+
 # Cap how long a video we'll process. Long videos are slow to transcribe on
 # CPU, but we allow up to ~3h. ~1 clip per CLIP_EVERY_MINUTES of video.
 MAX_VIDEO_MINUTES = 100
@@ -279,7 +370,7 @@ def _probe_duration(path):
         return None
 
 
-def download_video(url, workdir, start=None, end=None):
+def download_video(url, workdir, start=None, end=None, on_progress=None):
     """Download the video as an mp4 into workdir, return its path.
 
     Caps at 1080p: a vertical 9:16 crop only keeps the centre ~600px of a
@@ -287,9 +378,11 @@ def download_video(url, workdir, start=None, end=None):
     Retries and parallel fragments make flaky connections less fatal.
     `start`/`end` (seconds) download only that part — for hours-long stream
     replays (Kick, Twitch); the file then starts at 0.
+    `on_progress(fraction or None, megabytes)` reports progress as it goes.
     """
     out_tmpl = os.path.join(workdir, "source.%(ext)s")
     bin_to_use = ytdlp_cmd()
+    live = ["--newline", "--progress-template", _PROGRESS_TEMPLATE]
 
     if _is_gdrive(url):
         # Google Drive: a single shared file, no proxy and no bot checks needed.
@@ -299,11 +392,14 @@ def download_video(url, workdir, start=None, end=None):
             "-f", "best",
             "--retries", "10",
             "--socket-timeout", "60",
+            *live,
             "-o", out_tmpl,
             "--", url,  # "--": a link can never be read as a yt-dlp option
         ]
         try:
-            _run(cmd, timeout=900)
+            _run_download(cmd, workdir, on_progress, timeout=900)
+        except DownloadStalled:
+            raise
         except RuntimeError as e:
             msg = str(e).lower()
             if "permission" in msg or "not be downloaded" in msg or "quota" in msg \
@@ -328,6 +424,7 @@ def download_video(url, workdir, start=None, end=None):
             "--extractor-retries", "5",
             "--concurrent-fragments", "2",
             "--socket-timeout", "60",
+            *live,
             "-o", out_tmpl,
         ]
         if start is not None or end is not None:
@@ -354,7 +451,7 @@ def download_video(url, workdir, start=None, end=None):
         cmd += ["--", url]  # "--": a link can never be read as a yt-dlp option
         try:
             # A 100-minute slice of a stream replay can take a while to fetch.
-            _run(cmd, timeout=1800)
+            _run_download(cmd, workdir, on_progress, timeout=1800)
         except RuntimeError as e:
             # Match on yt-dlp's output only: the first line echoes the command,
             # and a link's own text (e.g. an id containing "404") must not count.
@@ -1815,7 +1912,14 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
 
     if not source_file:
         progress(5, "Downloading video...")
-        video = download_video(url, workdir, start=start, end=end)
+
+        def dl_progress(frac, mb):
+            if frac is None:  # a part of a replay: size known only at the end
+                progress(5, f"Downloading video… {mb:.0f} MB so far")
+            else:
+                progress(5 + int(frac * 20), f"Downloading video… {frac * 100:.0f}% ({mb:.0f} MB)")
+
+        video = download_video(url, workdir, start=start, end=end, on_progress=dl_progress)
         if _is_gdrive(url) and (start is not None or end is not None):
             # Drive hands over the whole file; keep just the chosen part.
             video = _trim(video, workdir, start, end)
