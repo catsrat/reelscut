@@ -124,6 +124,59 @@ def _run(cmd, cwd=None, timeout=None):
     return proc.stdout
 
 
+# A slow machine still advances ffmpeg's output clock; a hung ffmpeg doesn't.
+FFMPEG_STALL_SECS = 600
+
+
+class FFmpegStalled(RuntimeError):
+    pass
+
+
+def _run_ffmpeg(cmd, cwd=None, expected=None, on_progress=None):
+    """Run ffmpeg, reporting progress as a 0..1 fraction of `expected` output
+    seconds, and kill it if its output clock stops moving for
+    FFMPEG_STALL_SECS (stuck, as opposed to merely slow)."""
+    import tempfile
+    import threading
+
+    cmd = [str(c) for c in cmd]
+    cmd = [_tool(cmd[0]), "-progress", "pipe:1", "-nostats", *cmd[1:]]
+    state = {"moved": time.time(), "secs": -1.0}
+    stalled = threading.Event()
+    with tempfile.TemporaryFile() as errf:  # a file, so a chatty stderr can't block the pipe
+        proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=errf,
+                                text=True, errors="replace")
+
+        def watchdog():
+            while proc.poll() is None:
+                if time.time() - state["moved"] > FFMPEG_STALL_SECS:
+                    stalled.set()
+                    proc.kill()
+                    return
+                time.sleep(5)
+
+        threading.Thread(target=watchdog, daemon=True).start()
+        for line in proc.stdout:
+            if not line.startswith("out_time_us="):
+                continue
+            try:
+                secs = int(line.split("=", 1)[1]) / 1e6
+            except ValueError:  # "N/A" before the first frame
+                continue
+            if secs > state["secs"]:
+                state["secs"], state["moved"] = secs, time.time()
+                if expected and on_progress:
+                    on_progress(max(0.0, min(1.0, secs / expected)))
+        proc.wait()
+        if stalled.is_set():
+            raise FFmpegStalled(
+                f"Rendering stalled (no progress for {FFMPEG_STALL_SECS // 60} minutes).")
+        if proc.returncode != 0:
+            errf.seek(0)
+            err = errf.read().decode("utf-8", "replace")
+            raise RuntimeError(_redact(f"Command failed: {' '.join(cmd)}\n{err[-2000:]}"))
+
+
 # ---------------------------------------------------------------- download
 
 # Cap how long a video we'll process. Long videos are slow to transcribe on
@@ -1162,8 +1215,10 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
               split_mode="off", cam_corner="bottom-right", cam_size=CAM_SIZE,
               logo_path=None, logo_scale=0.16, logo_corner="top-right",
               captions=True, jump_cut=True, punchy=False, punch_zoom=False,
-              color_pop=False, auto_crop=False):
+              color_pop=False, auto_crop=False, on_progress=None):
     """Cut, remove dead space, crop to 9:16, overlay captions, optional music.
+
+    on_progress(fraction) is called while ffmpeg renders (0..1).
 
 
     split_mode:
@@ -1361,7 +1416,7 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
     else:
         audio_map = speech if tighten else "0:a?"
 
-    _run([
+    cmd = [
         "ffmpeg", "-y", *inputs,
         "-filter_complex", ";".join(parts),
         "-map", f"[{last}]", "-map", audio_map,
@@ -1370,7 +1425,14 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k",
         out_name,
-    ], cwd=out_dir)
+    ]
+    expected = kept if tighten else duration  # output length after jump cuts
+    try:
+        _run_ffmpeg(cmd, cwd=out_dir, expected=expected, on_progress=on_progress)
+    except FFmpegStalled:
+        # A hang is usually a one-off (I/O hiccup, starved CPU) — retry once.
+        print(f"[render] {out_name} stalled; retrying once", flush=True)
+        _run_ffmpeg(cmd, cwd=out_dir, expected=expected, on_progress=on_progress)
     return out_name
 
 
@@ -1569,10 +1631,19 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
 
     results = []
     for i, clip in enumerate(clips, 1):
-        progress(
-            70 + int(28 * i / len(clips)),
-            f"Rendering reel {i} of {len(clips)}: {clip['title']}",
-        )
+        n_clips = len(clips)
+        progress(70 + int(28 * (i - 1) / n_clips),
+                 f"Rendering reel {i} of {n_clips}: {clip['title']}")
+        shown = [0]
+
+        def on_render(frac, i=i, n=n_clips, title=clip["title"], shown=shown):
+            # Live % inside a reel, so a slow render never looks frozen.
+            # Throttled: every 5% is plenty and keeps database writes low.
+            pct = int(frac * 100)
+            if pct >= shown[0] + 5:
+                shown[0] = pct
+                progress(70 + int(28 * (i - 1 + frac) / n),
+                         f"Rendering reel {i} of {n} — {pct}%: {title}")
         # Per-clip, mood-matched music.
         music_path = music_for_mood(clip.get("mood")) if music else None
         fname = make_clip(
@@ -1581,7 +1652,7 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
             logo_path=logo_file, logo_scale=logo_scale, logo_corner=logo_corner,
             captions=captions, jump_cut=(not full_mode),
             punchy=punchy, punch_zoom=punch_zoom, color_pop=color_pop,
-            auto_crop=auto_crop,
+            auto_crop=auto_crop, on_progress=on_render,
         )
         # Actual length after dead-space removal (falls back to the cut range).
         actual = _probe_duration(os.path.join(workdir, fname))

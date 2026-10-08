@@ -665,8 +665,24 @@ async function chunkedUpload(file, o, logoFile){
   return await (await fetch('/upload_done', {method:'POST', body: fd})).json();
 }
 
+let pollMisses = 0;
 async function poll(jobId){
-  const job = await (await fetch('/status/'+jobId)).json();
+  let r, job;
+  try {
+    r = await fetch('/status/'+jobId);
+    job = await r.json();
+  } catch (_) {
+    // Server asleep or restarting: keep trying (~5 min) instead of freezing.
+    if (++pollMisses > 100) { fail('Lost connection to the server. Refresh the page to check on your reels.'); return; }
+    msg.textContent = 'Reconnecting to the server…';
+    setTimeout(() => poll(jobId), 3000);
+    return;
+  }
+  pollMisses = 0;
+  if (r.status === 404) {
+    fail('This job is no longer on the server (it restarted). Please start it again — you weren\'t charged for it.');
+    return;
+  }
   if (job.title) titleEl.textContent = job.title;
   fill.style.width = (job.progress||0) + '%';
   pctEl.textContent = (job.progress||0) + '%';
