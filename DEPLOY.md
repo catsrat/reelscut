@@ -91,4 +91,4 @@ runs in **local mode**: no login and no limits, as it always has on your machine
 - **Worker.** The job worker (`python worker.py`) runs beside the web server. The Dockerfile starts both, and `python app.py` runs a worker in-process for local use.
 
 **Other limits** (optional): `MAX_UPLOAD_MB` (2048), `JOB_TTL_HOURS` (24, `0` = keep forever),
-`MAX_PENDING_UPLOADS` (3), `MIN_FREE_GB` (5).
+`MAX_PENDING_UPLOADS` (3), `MIN_FREE_GB` (5), `CLIP_TTL_HOURS` (72: how long finished reels are kept on the disk; older ones, or the oldest when space runs low, are deleted).

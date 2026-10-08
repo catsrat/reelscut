@@ -61,6 +61,8 @@ MIN_FREE_BYTES = int(float(os.environ.get("MIN_FREE_GB", "5")) * GB)
 MAX_LOGO_BYTES = 10 * MB
 LOGO_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 CLEANUP_EVERY_SECS = 30 * 60
+CLIP_TTL_HOURS = float(os.environ.get("CLIP_TTL_HOURS", "72"))  # saved reels; 0 = keep
+CLIPS_MIN_FREE = 400 * MB  # prune oldest saved reels below this much free disk
 
 app = Flask(__name__)
 # Per-request cap: covers the one-shot /upload route (+ logo). Chunked uploads
@@ -241,6 +243,34 @@ def cleanup_jobs():
             removed += 1
     if removed:
         print(f"[cleanup] removed {removed} old job folder(s)", flush=True)
+    cleanup_saved_clips(now)
+
+
+def cleanup_saved_clips(now=None):
+    """Saved reels on the persistent disk: delete after CLIP_TTL_HOURS, and
+    oldest-first whenever free space drops below CLIPS_MIN_FREE — the disk also
+    holds the database, which must never run out of room."""
+    now = now or time.time()
+    if not os.path.isdir(db.CLIPS_DIR):
+        return
+    dirs = []
+    for name in os.listdir(db.CLIPS_DIR):
+        path = os.path.join(db.CLIPS_DIR, name)
+        if os.path.isdir(path):
+            try:
+                dirs.append((_last_touched(path), path))
+            except OSError:
+                pass
+    dirs.sort()  # oldest first
+    removed = 0
+    for touched, path in dirs:
+        too_old = CLIP_TTL_HOURS > 0 and now - touched > CLIP_TTL_HOURS * 3600
+        low = shutil.disk_usage(db.CLIPS_DIR).free < CLIPS_MIN_FREE
+        if too_old or low:
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+    if removed:
+        print(f"[cleanup] removed {removed} saved reel folder(s)", flush=True)
 
 
 def _janitor():
@@ -512,7 +542,14 @@ def status(user, job_id):
 def clip(user, job_id, filename):
     if not _own_job(job_id, user):
         abort(404)
-    return send_from_directory(os.path.join(JOBS_DIR, job_id), filename)
+    # Saved reels on the persistent disk first; the temporary job folder only
+    # if the disk was too full to move them there.
+    for base in (os.path.join(db.CLIPS_DIR, job_id), os.path.join(JOBS_DIR, job_id)):
+        if os.path.isfile(os.path.join(base, os.path.basename(filename))):
+            # ?dl=1: send as a download (the Download button) instead of inline.
+            return send_from_directory(base, os.path.basename(filename),
+                                       as_attachment=request.args.get("dl") == "1")
+    abort(404)
 
 
 # Runs under gunicorn too (single worker), not just `python app.py`.

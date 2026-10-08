@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(ROOT, "data")
 DB_PATH = os.path.join(DATA_DIR, "reelscut.db")
+# Finished reels live here (on the persistent disk) so deploys don't delete them.
+CLIPS_DIR = os.path.join(DATA_DIR, "clips")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (

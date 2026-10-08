@@ -788,7 +788,7 @@ function render(jobId, clips, compliance){
         (c.reason ? '<p class="reason">'+escapeHtml(c.reason)+'</p>' : '') +
         '<div class="time">'+c.length+'s · '+fmt(c.start)+' → '+fmt(c.end) +
           (c.mood ? ' · '+escapeHtml(c.mood) : '') + '</div>' +
-        '<a class="btn btn-secondary btn-sm" href="'+src+'" download>'+ICON('download')+'Download</a>' +
+        '<a class="btn btn-secondary btn-sm" href="'+(c.url ? src : src+'?dl=1')+'" download>'+ICON('download')+'Download</a>' +
       '</div>';
     grid.appendChild(div);
   }
