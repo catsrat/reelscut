@@ -153,6 +153,11 @@ def _attach_logo(workdir, opts):
 DISK_MSG = "The server is low on disk space right now — please try again in a bit."
 
 
+def _size_label(n):
+    """2147483648 -> '2 GB', 524288000 -> '500 MB' (non-breaking space)."""
+    return f"{n / GB:g} GB" if n >= GB else f"{n // MB} MB"
+
+
 def _too_big_msg():
     return (f"That file is too large (max {MAX_UPLOAD_BYTES // MB} MB). "
             "Trim it first, or paste a Google Drive link instead.")
@@ -274,7 +279,7 @@ def index(user):
     return render_template(
         "index.html", has_key=has_key, show_link=show_link, yt_enabled=yt_enabled,
         user=user, quota=billing.quota_json(billing.quota(user)),
-        accounts=auth.enabled(),
+        accounts=auth.enabled(), max_upload=_size_label(MAX_UPLOAD_BYTES),
     )
 
 

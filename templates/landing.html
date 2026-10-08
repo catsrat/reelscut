@@ -107,10 +107,8 @@
   .phone:hover{transform:perspective(1000px) rotateY(6deg) translateY(-8px);box-shadow:0 40px 80px rgba(213,0,28,.3)}
   .screen{position:relative;width:100%;height:100%;border-radius:23px;overflow:hidden;background:#000}
   .screen video{width:100%;height:100%;object-fit:cover;display:block}
-  .screen .cap{position:absolute;left:8px;right:8px;bottom:26%;text-align:center;font-weight:800;
-     font-size:15px;letter-spacing:.3px;color:#fff;text-transform:uppercase;line-height:1.15;
-     text-shadow:0 0 2px #000,0 2px 6px #000,2px 0 2px #000,-2px 0 2px #000}
-  .screen .cap b{color:#ffde00}
+  .reel-title{margin:14px 4px 0;text-align:center;font-size:14px;font-weight:700;color:var(--text)}
+  .reel-title span{display:block;margin-top:3px;font-size:12px;font-weight:500;color:var(--dim)}
   .screen .notch{position:absolute;top:8px;left:50%;transform:translateX(-50%);width:34%;height:7px;border-radius:10px;background:#000;opacity:.7}
 
   /* band */
@@ -180,21 +178,21 @@
   <div class="center rv">
     <div class="eyebrow">See it in action</div>
     <h2>Real clips, ready to post</h2>
-    <p class="lead">Short, vertical, captioned — straight out of the app.</p>
+    <p class="lead">Four reels cut from one 23-minute Crazy Time stream — facecam layout, captions and zooms straight out of the app.</p>
   </div>
   <div class="reels">
-    <div class="phone rv"><div class="screen"><span class="notch"></span>
-      <video src="/static/demo1.mp4" autoplay muted loop playsinline></video>
-      <div class="cap">THIS CHANGED <b>EVERYTHING</b></div></div></div>
-    <div class="phone rv"><div class="screen"><span class="notch"></span>
-      <video src="/static/demo2.mp4" autoplay muted loop playsinline></video>
-      <div class="cap">నమ్మలేని <b>నిజం</b></div></div></div>
-    <div class="phone rv"><div class="screen"><span class="notch"></span>
-      <video src="/static/demo3.mp4" autoplay muted loop playsinline></video>
-      <div class="cap">NOBODY TELLS <b>YOU THIS</b></div></div></div>
-    <div class="phone rv"><div class="screen"><span class="notch"></span>
-      <video src="/static/demo4.mp4" autoplay muted loop playsinline></video>
-      <div class="cap">वायरल <b>मोमेंट</b></div></div></div>
+    <div class="rv"><div class="phone"><div class="screen"><span class="notch"></span>
+      <video src="/static/demo1.mp4" autoplay muted loop playsinline aria-label="Example reel: I called it, 50x win"></video></div></div>
+      <p class="reel-title">“I called it” — 50x win<span>Punchy captions · zoom</span></p></div>
+    <div class="rv"><div class="phone"><div class="screen"><span class="notch"></span>
+      <video src="/static/demo2.mp4" autoplay muted loop playsinline aria-label="Example reel: Glue stick"></video></div></div>
+      <p class="reel-title">“Glue stick!”<span>Bold one-word captions</span></p></div>
+    <div class="rv"><div class="phone"><div class="screen"><span class="notch"></span>
+      <video src="/static/demo3.mp4" autoplay muted loop playsinline aria-label="Example reel: That was 200,000 dollars"></video></div></div>
+      <p class="reel-title">The $200K near miss<span>Green pop captions · zoom</span></p></div>
+    <div class="rv"><div class="phone"><div class="screen"><span class="notch"></span>
+      <video src="/static/demo4.mp4" autoplay muted loop playsinline aria-label="Example reel: The Colin curse"></video></div></div>
+      <p class="reel-title">The Colin curse<span>Classic captions · color pop</span></p></div>
   </div>
 </div></section>
 
