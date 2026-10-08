@@ -260,7 +260,7 @@ def too_large(_e):
 def landing():
     # Pricing section comes straight from the same settings billing uses, so
     # the page can never advertise different minutes than users actually get.
-    plans = [{"name": p.name, "minutes": p.minutes, "price": p.price}
+    plans = [{"name": p.name, "minutes": p.minutes, "price": p.price, "url": p.url}
              for p in sorted(billing.paid_plans(), key=lambda p: p.minutes)]
     return render_template(
         "landing.html", free_minutes=billing.FREE.minutes, plans=plans,

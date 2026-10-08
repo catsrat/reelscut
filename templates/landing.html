@@ -349,7 +349,7 @@
         <li><svg class="i"><use href="#i-check"/></svg>Cancel anytime on Whop</li>
       </ul>
       <a class="btn {% if loop.last and plans|length > 1 %}btn-primary{% else %}btn-secondary{% endif %}"
-         href="{{ store_url or '/app' }}"{% if store_url %} target="_blank" rel="noopener"{% endif %}>Get {{ p.name }}</a>
+         href="{{ p.url or store_url or '/app' }}"{% if p.url or store_url %} target="_blank" rel="noopener"{% endif %}>Get {{ p.name }}</a>
     </div>
     {% endfor %}
   </div>
