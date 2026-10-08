@@ -378,8 +378,13 @@ def upload_start(user):
             return jsonify({"error": "Too many uploads in progress — please "
                                      "try again in a few minutes."}), 429
         uid = uuid.uuid4().hex[:12]
-        PENDING_UPLOADS[uid] = {"user": user["id"], "touched": now}
+        # size: what the browser says it will send; chunks: offset -> bytes
+        # received, so upload_done can tell a complete file from a gappy one.
+        PENDING_UPLOADS[uid] = {"user": user["id"], "touched": now, "size": size, "chunks": {}}
     os.makedirs(os.path.join(JOBS_DIR, uid), exist_ok=True)
+    # Create the file up front: parallel pieces then all open it "r+b" and
+    # write at their own offset (two "wb" opens would truncate each other).
+    open(os.path.join(JOBS_DIR, uid, "upload.part"), "wb").close()
     return jsonify({"upload_id": uid})
 
 
@@ -414,24 +419,27 @@ def upload_chunk(user):
     if not chunk:
         return jsonify({"error": "no chunk"}), 400
     data = chunk.read()
-    part = os.path.join(workdir, "upload.part")
-    have = os.path.getsize(part) if os.path.exists(part) else 0
     try:
-        offset = int(request.form.get("offset", have))
+        offset = int(request.form.get("offset", ""))
     except ValueError:
         return jsonify({"error": "bad offset"}), 400
-    # A retry of a chunk we already stored (the response got lost): don't
-    # append it twice, which would corrupt the video.
-    if data and offset + len(data) == have:
-        return jsonify({"ok": True})
-    if offset != have:
-        return jsonify({"error": "Upload got out of sync — please try again."}), 409
-    if have + len(data) > MAX_UPLOAD_BYTES:
+    if offset < 0:
+        return jsonify({"error": "bad offset"}), 400
+    if offset + len(data) > MAX_UPLOAD_BYTES:
         _drop_upload(uid)
         return jsonify({"error": _too_big_msg()}), 413
-    with open(part, "ab") as f:
+    size = pending.get("size") or 0
+    if size and offset + len(data) > size:
+        return jsonify({"error": "Upload got out of sync — please try again."}), 409
+    # The browser sends several pieces at once, in any order: write each at
+    # its own offset. Idempotent, so a retried piece just overwrites itself.
+    part = os.path.join(workdir, "upload.part")
+    with open(part, "r+b" if os.path.exists(part) else "w+b") as f:
+        f.seek(offset)
         f.write(data)
-    pending["touched"] = time.time()
+    with UPLOADS_LOCK:
+        pending.setdefault("chunks", {})[offset] = len(data)
+        pending["touched"] = time.time()
     return jsonify({"ok": True})
 
 
@@ -443,8 +451,15 @@ def upload_done(user):
         return jsonify({"error": "bad upload id"}), 400
     workdir = os.path.join(JOBS_DIR, uid)
     part = os.path.join(workdir, "upload.part")
-    if not _pending_for(uid, user) or not os.path.exists(part):
+    pending = _pending_for(uid, user)
+    if not pending or not os.path.exists(part):
         return jsonify({"error": "Upload not found — please try again."}), 400
+    size = pending.get("size") or 0
+    with UPLOADS_LOCK:
+        got = sum(pending.get("chunks", {}).values())
+    if size and (got < size or os.path.getsize(part) < size):
+        return jsonify({"error": "The upload didn't finish — some pieces are "
+                                 "missing. Please try again."}), 400
     refusal = _refuse(user)
     if refusal:
         _drop_upload(uid)
