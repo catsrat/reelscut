@@ -104,13 +104,14 @@ def login():
 
 _ERROR_PAGE = """<!doctype html><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign-in problem</title>
-<body style="font-family:system-ui,sans-serif;background:#0a0a0c;color:#f5f5f7;
+<title>Sign-in problem — Reelscut</title>
+<body style="font-family:Inter,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0b0c;color:#f4f4f5;
 display:grid;place-items:center;min-height:100vh;margin:0;padding:16px">
-<div style="max-width:420px;text-align:center"><h2>Couldn't sign you in</h2>
-<p style="color:#8a8f98">{{ msg }}</p>
-<a href="/login" style="color:#fff;background:#d5001c;padding:10px 18px;
-border-radius:10px;text-decoration:none;font-weight:700">Try again</a></div>"""
+<div style="max-width:400px;width:100%;text-align:center;background:#131315;border:1px solid rgba(255,255,255,.07);
+border-radius:20px;padding:36px 28px"><h2 style="margin:0 0 8px;font-size:20px;font-weight:600">Couldn't sign you in</h2>
+<p style="color:#a1a1aa;margin:0 0 24px;font-size:15px;line-height:1.55">{{ msg }}</p>
+<a href="/login" style="display:inline-block;color:#fff;background:#ff3b4e;padding:10px 18px;
+border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">Try again</a></div>"""
 
 
 def _fail(msg):

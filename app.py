@@ -258,7 +258,14 @@ def too_large(_e):
 
 @app.route("/")
 def landing():
-    return render_template("landing.html")
+    # Pricing section comes straight from the same settings billing uses, so
+    # the page can never advertise different minutes than users actually get.
+    plans = [{"name": p.name, "minutes": p.minutes, "price": p.price}
+             for p in sorted(billing.paid_plans(), key=lambda p: p.minutes)]
+    return render_template(
+        "landing.html", free_minutes=billing.FREE.minutes, plans=plans,
+        store_url=os.environ.get("WHOP_STORE_URL", "").strip(),
+    )
 
 
 @app.route("/app")
