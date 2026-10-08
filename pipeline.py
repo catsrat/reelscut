@@ -14,10 +14,13 @@ Everything here is plain function calls so app.py can drive it from a
 background thread and report progress.
 """
 
+import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import glob
 import time
 
@@ -72,8 +75,41 @@ def _is_gdrive(url):
     return "drive.google.com" in u or "docs.google.com" in u
 
 
+def _tool(name):
+    """Resolve an external tool: PATH first (Docker/Linux/Mac, or a Windows
+    install), then the bundled Windows binaries in bin/."""
+    found = shutil.which(name)
+    if found:
+        return found
+    local = os.path.join(ROOT, "bin", name + (".exe" if os.name == "nt" else ""))
+    return local if os.path.exists(local) else name
+
+
+def ytdlp_cmd():
+    """yt-dlp as `python -m yt_dlp` from this interpreter when installed — works
+    the same on every OS and avoids Windows blocking the yt-dlp.exe shim."""
+    if importlib.util.find_spec("yt_dlp"):
+        return [sys.executable, "-m", "yt_dlp"]
+    return ["yt-dlp"]
+
+
+def ytdlp_available():
+    return bool(importlib.util.find_spec("yt_dlp") or shutil.which("yt-dlp"))
+
+
+def _redact(text):
+    """Hide credentials embedded in URLs (e.g. the YTDLP_PROXY user:pass) so
+    they never reach the logs or the UI's error message."""
+    return re.sub(r"://[^/\s:@]+:[^/\s@]+@", "://***@", text)
+
+
 def _run(cmd, cwd=None, timeout=None):
-    """Run a command, raising with captured output if it fails or times out."""
+    """Run a command, raising with captured output if it fails or times out.
+
+    Always an argument list, never shell=True: URLs and filenames come from
+    users, and a shell would let a crafted link run commands on the server."""
+    cmd = [str(c) for c in cmd]
+    cmd[0] = _tool(cmd[0])
     try:
         proc = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True, errors="replace",
@@ -82,9 +118,9 @@ def _run(cmd, cwd=None, timeout=None):
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Timed out after {timeout}s: {' '.join(cmd[:2])}")
     if proc.returncode != 0:
-        raise RuntimeError(
+        raise RuntimeError(_redact(
             f"Command failed: {' '.join(cmd)}\n{proc.stderr[-2000:]}"
-        )
+        ))
     return proc.stdout
 
 
@@ -103,7 +139,8 @@ def get_title(url):
     # Drive needs no proxy; skip it so a flaky proxy can't slow the metadata call.
     proxy = [] if _is_gdrive(url) else _proxy_args()
     try:
-        out = _run(["yt-dlp", "--no-warnings", *proxy, "--print", "title", url], timeout=70)
+        bin_to_use = ytdlp_cmd()
+        out = _run(bin_to_use + ["--no-warnings", *proxy, "--print", "title", "--", url], timeout=70)
         return out.strip() or "Untitled video"
     except Exception:
         return "Untitled video"
@@ -113,7 +150,8 @@ def get_duration(url):
     """Return video length in seconds, or None if it can't be determined."""
     proxy = [] if _is_gdrive(url) else _proxy_args()
     try:
-        out = _run(["yt-dlp", "--no-warnings", *proxy, "--print", "duration", url], timeout=70)
+        bin_to_use = ytdlp_cmd()
+        out = _run(bin_to_use + ["--no-warnings", *proxy, "--print", "duration", "--", url], timeout=70)
         return float(out.strip())
     except Exception:
         return None
@@ -122,11 +160,10 @@ def get_duration(url):
 def _probe_duration(path):
     """Duration of a local media file in seconds, or None."""
     try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=nw=1:nk=1", path],
-            capture_output=True, text=True,
-        ).stdout.strip()
+        out = _run([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=nw=1:nk=1", path
+        ]).strip()
         return float(out)
     except Exception:
         return None
@@ -140,17 +177,18 @@ def download_video(url, workdir):
     Retries and parallel fragments make flaky connections less fatal.
     """
     out_tmpl = os.path.join(workdir, "source.%(ext)s")
+    bin_to_use = ytdlp_cmd()
 
     if _is_gdrive(url):
         # Google Drive: a single shared file, no proxy and no bot checks needed.
         # `best` just grabs the file as-is. Works for "Anyone with the link" files.
-        cmd = [
-            "yt-dlp", "--no-warnings",
+        cmd = bin_to_use + [
+            "--no-warnings",
             "-f", "best",
             "--retries", "10",
             "--socket-timeout", "60",
             "-o", out_tmpl,
-            url,
+            "--", url,  # "--": a link can never be read as a yt-dlp option
         ]
         try:
             _run(cmd, timeout=900)
@@ -165,8 +203,7 @@ def download_video(url, workdir):
                 )
             raise
     else:
-        cmd = [
-            "yt-dlp",
+        cmd = bin_to_use + [
             "--no-warnings",
             *_proxy_args(),
             "-f", "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/best",
@@ -199,7 +236,7 @@ def download_video(url, workdir):
                 cmd += ["--cookies", cookies_file]
         elif browser:
             cmd += ["--cookies-from-browser", browser]
-        cmd.append(url)
+        cmd += ["--", url]  # "--": a link can never be read as a yt-dlp option
         try:
             _run(cmd, timeout=900)
         except RuntimeError as e:
@@ -260,7 +297,30 @@ def transcribe(audio_path, workdir, model_path=MODEL_PATH, language="en"):
     # ("te", "hi", ...) or "auto" to detect it.
     if language and language != "en":
         cmd += ["-l", language]
-    _run(cmd, timeout=1800)  # safety net so a slow CPU run can't hang forever
+    try:
+        _run(cmd, timeout=1800)
+    except (RuntimeError, FileNotFoundError, OSError) as e:
+        # Fallback to openai-whisper (optional: `pip install openai-whisper`)
+        # if the whisper.cpp binary is blocked or not found.
+        try:
+            import whisper
+            # Use "base" as it matches the ggml-base.en.bin intent
+            model = whisper.load_model("base")
+            result = model.transcribe(audio_path, word_timestamps=True, language=None if language == "auto" else language)
+        except Exception as fallback_e:
+            raise RuntimeError(f"Primary transcription failed ({e}) and fallback also failed ({fallback_e})") from e
+        words = []
+        for segment in result.get("segments", []):
+            for w in segment.get("words", []):
+                words.append({
+                    "start": w.get("start", 0),
+                    "end": w.get("end", 0),
+                    "text": w.get("word", "").strip(),
+                })
+        words = [w for w in words if w["text"]]
+        if not words:
+            raise RuntimeError("Transcription returned no speech segments.")
+        return words
     # whisper.cpp can split a multi-byte character across segments, producing
     # invalid UTF-8 in the JSON for non-Latin scripts — decode tolerantly.
     with open(out_base + ".json", encoding="utf-8", errors="replace") as f:
@@ -281,6 +341,49 @@ def transcribe(audio_path, workdir, model_path=MODEL_PATH, language="en"):
         raise RuntimeError("Transcription returned no speech segments.")
     return words
 
+
+def transcribe_groq(audio_path, workdir, language="en"):
+    """Transcribe via Groq (free tier, high speed). Returns word list.
+    Note: Groq's Whisper API currently provides segment-level timestamps.
+    We distribute words evenly within segments for captioning.
+    """
+    from groq import Groq
+    client = Groq() # Uses GROQ_API_KEY environment variable
+    # Groq has a 25MB limit. WAV files are large, so we compress to MP3 if needed.
+    file_size = os.path.getsize(audio_path)
+    upload_path = audio_path
+    if file_size > 24 * 1024 * 1024:
+        compressed_path = os.path.join(workdir, "audio_compressed.mp3")
+        _run(["ffmpeg", "-y", "-i", audio_path, "-codec:a", "libmp3lame", "-b:a", "64k", compressed_path])
+        upload_path = compressed_path
+
+    with open(upload_path, "rb") as f:
+        transcription = client.audio.transcriptions.create(
+            file=(os.path.basename(upload_path), f),
+            model="whisper-large-v3",
+            response_format="verbose_json",
+            language=language if language != "auto" else None,
+        )
+
+    words = []
+    for segment in transcription.segments:
+        start = segment.start
+        end = segment.end
+        text = segment.text.strip()
+        if not text:
+            continue
+
+        # Distribute words evenly across the segment duration
+        toks = text.split()
+        dur = end - start
+        per_word = dur / len(toks)
+        for i, tok in enumerate(toks):
+            words.append({
+                "start": start + (i * per_word),
+                "end": start + ((i + 1) * per_word),
+                "text": tok,
+            })
+    return words
 
 def group_phrases(words, max_gap=0.7, max_words=12):
     """Group word-level entries into sentence-ish phrases for moment selection."""
@@ -661,8 +764,10 @@ CAPTION_STYLES = {
     "yellow_punch": {"font": _POPPINS, "color": (255, 222, 0),   "upper": True},   # Hormozi-style
     "green_pop":    {"font": _POPPINS, "color": (60, 255, 90),   "upper": True},
     "tiktok_tall":  {"font": _ANTON,   "color": (255, 255, 255), "upper": True},   # tall condensed
+    "mrbeast":      {"font": _ANTON,   "color": (255, 255, 255), "upper": True},   # Bold and bright
     "classic":      {"font": FONT_PATH, "color": (255, 255, 255), "upper": False}, # Arial, mixed case
 }
+POWER_WORDS = {"money", "secret", "viral", "ai", "hack", "free", "best", "shocking", "crazy"}
 DEFAULT_STYLE = "bold_white"
 
 # Indic scripts need a font with proper conjunct tables AND raqm (HarfBuzz)
@@ -741,31 +846,37 @@ def _render_caption_png(text, png_path, style=None, font_size=FONT_SIZE,
                         center_y=CAPTION_CENTER_Y):
     """Render a caption onto a FULL WxH transparent frame, centred at center_y.
 
-    Full-frame (not a strip) so every caption is the same size and can be
-    concatenated into ONE transparent caption track + a SINGLE overlay — which
-    scales to hundreds of captions. (One image-input per caption does NOT scale:
-    a long/punchy clip hits ffmpeg's input/decoder limit.)"""
+    Includes keyword highlighting for 'power words' to increase engagement.
+    """
     from PIL import Image, ImageDraw
 
     style = CAPTION_STYLES.get(style or DEFAULT_STYLE, CAPTION_STYLES[DEFAULT_STYLE])
     if style["upper"] and all(ord(c) < 0x250 for c in text):
         text = text.upper()
-    color = style["color"] + (255,)
+
+    base_color = style["color"] + (255,)
+    # Highlight color: Yellow for white style, Green for others
+    highlight_color = (255, 222, 0, 255) if style == CAPTION_STYLES["bold_white"] else (60, 255, 90, 255)
     font = _font_for(text, font_size, style["font"])
 
     margin = 80
     max_w = W - 2 * margin
     words = text.split()
-    lines, cur = [], ""
-    for word in words:
-        test = (cur + " " + word).strip()
-        if font.getlength(test) <= max_w or not cur:
-            cur = test
+
+    lines = []
+    cur_line = []
+    cur_w = 0
+    for w in words:
+        w_len = font.getlength(w) + (10 if cur_line else 0)
+        if cur_w + w_len <= max_w or not cur_line:
+            cur_line.append(w)
+            cur_w += w_len
         else:
-            lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
+            lines.append(cur_line)
+            cur_line = [w]
+            cur_w = w_len
+    if cur_line:
+        lines.append(cur_line)
 
     line_h = int(font_size * 1.2)
     pad = 22
@@ -773,13 +884,20 @@ def _render_caption_png(text, png_path, style=None, font_size=FONT_SIZE,
     strip_h = line_h * len(lines) + 2 * pad
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
+
     y = max(0, min(H - strip_h, int(H * center_y - strip_h / 2))) + pad
     for line in lines:
-        x = (W - font.getlength(line)) / 2
-        draw.text(
-            (x, y), line, font=font, fill=color,
-            stroke_width=stroke, stroke_fill=(0, 0, 0, 255),
-        )
+        line_text = " ".join(line)
+        line_w = font.getlength(line_text)
+        x = (W - line_w) / 2
+        for word in line:
+            word_lower = word.lower().strip(".,!?")
+            color = highlight_color if word_lower in POWER_WORDS else base_color
+            draw.text(
+                (x, y), word, font=font, fill=color,
+                stroke_width=stroke, stroke_fill=(0, 0, 0, 255),
+            )
+            x += font.getlength(word) + 10
         y += line_h
     img.save(png_path)
 
@@ -793,7 +911,7 @@ SILENCE_PAD = 0.07        # leave a little air around speech so cuts aren't hars
 def _detect_silences(video_path, start, end):
     """Return [(s, e)] silence intervals within the clip, in clip-relative secs."""
     out = subprocess.run(
-        ["ffmpeg", "-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", video_path,
+        [_tool("ffmpeg"), "-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", video_path,
          "-af", f"silencedetect=noise={SILENCE_DB}dB:d={SILENCE_MIN}",
          "-f", "null", "-"],
         capture_output=True, text=True, errors="replace",
@@ -840,6 +958,38 @@ def _remap(t, keeps):
     return new
 
 
+def _get_face_center(video_path, start, end):
+    """Sample frames to find the average speaker's face center (X-coordinate).
+    Returns a float (0.0 to 1.0) representing the horizontal center of the face.
+    """
+    import cv2  # lazy: only needed when face tracking is on (opencv-python-headless)
+
+    cap = cv2.VideoCapture(video_path)
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+
+    # Haar Cascade for face detection (built-in to OpenCV)
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+    centers = []
+    # Sample one frame per second to keep it fast
+    for t in range(int(start), int(end)):
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+
+        if len(faces) > 0:
+            # Use the largest face found in the frame
+            (x, y, w, h) = max(faces, key=lambda f: f[2]*f[3])
+            center_x = (x + w/2) / width
+            centers.append(center_x)
+
+    cap.release()
+    return sum(centers) / len(centers) if centers else 0.5
+
 CAM_SIZE = 0.30  # facecam box width as a fraction of the source width
 
 _CAM_CORNER = {
@@ -856,8 +1006,9 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
               split_mode="off", cam_corner="bottom-right", cam_size=CAM_SIZE,
               logo_path=None, logo_scale=0.16, logo_corner="top-right",
               captions=True, jump_cut=True, punchy=False, punch_zoom=False,
-              color_pop=False):
+              color_pop=False, auto_crop=False):
     """Cut, remove dead space, crop to 9:16, overlay captions, optional music.
+
 
     split_mode:
       "off"      — normal full-frame vertical.
@@ -980,8 +1131,14 @@ def make_clip(video_path, words, clip, out_dir, index, music_path=None,
             "[top][bot]vstack=inputs=2:shortest=1[base]",
         ]
     else:
-        crop = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
-                f"crop={W}:{H}")
+        if auto_crop:
+            center_x = _get_face_center(video_path, start, end)
+            # Crop 720x1280 centered on the detected face X, and centered vertically
+            crop = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+                    f"crop={W}:{H}:(iw*{center_x})-({W}/2):(ih-{H})/2")
+        else:
+            crop = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+                    f"crop={W}:{H}")
         parts = [f"{vchain}{crop}[base]"]
 
     # Viral polish applied to the footage only (captions/logo stay crisp on top):
@@ -1107,7 +1264,8 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
                  source_file=None, logo_file=None, logo_scale=0.16,
                  logo_corner="top-right", clip_mode="moments", captions=True,
                  punchy=False, punch_zoom=False, color_pop=False,
-                 min_clip=None, max_clip=None):
+                 auto_crop=False,
+                 min_clip=None, max_clip=None, on_duration=None):
     """
     Full run. `progress(pct, message)` is called to report status.
     `language` is "en" (fast local English model), or a code like "te"/"hi"/"ta"
@@ -1122,6 +1280,8 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
                   captioned / branded).
     `captions`: burn animated captions (set False to only crop + add a logo,
     e.g. for a reel that already has captions baked in).
+    `on_duration(seconds)` is called once the video's length is known (before
+    the slow steps) so the caller can enforce a quota by raising.
     Returns list of {file, title, reason, start, end, length}.
     """
     full_mode = clip_mode == "full"
@@ -1139,6 +1299,8 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
             f"videos up to {MAX_VIDEO_MINUTES} minutes — try a shorter video, "
             "or a single segment of this one."
         )
+    if dur and on_duration:
+        on_duration(dur)
 
     if not source_file:
         progress(5, "Downloading video...")
@@ -1147,6 +1309,8 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
         # downloaded file so the length cap and clip count still work.
         if not dur:
             dur = _probe_duration(video)
+            if dur and on_duration:
+                on_duration(dur)
 
     # We need a transcript for caption text, and for AI moment selection.
     # If the user keeps the whole video AND wants no captions, skip it entirely
@@ -1156,23 +1320,40 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
     if need_transcript:
         progress(30, "Extracting audio...")
         audio = extract_audio(video, workdir)
-        # Non-English always uses Sarvam (accurate). English uses the local model
-        # by default (fast on a GPU Mac); set PREFER_SARVAM=1 in the cloud — where
-        # there's no GPU — to route English through Sarvam too and stay fast.
-        prefer_sarvam = os.environ.get("PREFER_SARVAM", "").strip().lower() in (
-            "1", "true", "yes")
+
+        prefer_sarvam = os.environ.get("PREFER_SARVAM", "").strip().lower() in ("1", "true", "yes")
         use_sarvam = bool(sarvam_key) and (language != "en" or prefer_sarvam)
-        if use_sarvam:
-            progress(45, "Transcribing with Sarvam (Indian-language engine)...")
-            words = transcribe_sarvam(audio, workdir, language, sarvam_key, progress)
-        else:
-            model_path = MODEL_PATH if language == "en" else MULTILINGUAL_MODEL
-            lang = "en" if language == "en" else language
-            mins = int((dur or 0) / 60)
-            note = "" if lang == "en" else " — non-English local model is slower"
-            est = f"~{mins} min of audio" if mins else "the audio"
-            progress(45, f"Transcribing {est}{note}. This can take a few minutes...")
-            words = transcribe(audio, workdir, model_path, lang)
+
+        try:
+            if use_sarvam:
+                progress(45, "Transcribing with Sarvam (Indian-language engine)...")
+                words = transcribe_sarvam(audio, workdir, language, sarvam_key, progress)
+            elif os.environ.get("GROQ_API_KEY"):
+                progress(45, "Transcribing with Groq (Free Cloud AI)...")
+                words = transcribe_groq(audio, workdir, language)
+            else:
+                model_path = MODEL_PATH if language == "en" else MULTILINGUAL_MODEL
+                lang = "en" if language == "en" else language
+                mins = int((dur or 0) / 60)
+                note = "" if lang == "en" else " — non-English local model is slower"
+                est = f"~{mins} min of audio" if mins else "the audio"
+                progress(45, f"Transcribing {est}{note}. This can take a few minutes...")
+                words = transcribe(audio, workdir, model_path, lang)
+        except Exception as e:
+            # If local transcription failed due to system policy and we have a Sarvam key, fallback to it automatically.
+            if not use_sarvam and sarvam_key:
+                progress(45, "Local transcription blocked by system policy. Falling back to Sarvam AI...")
+                try:
+                    words = transcribe_sarvam(audio, workdir, language, sarvam_key, progress)
+                except Exception as sarvam_e:
+                    raise RuntimeError(f"Local transcription failed ({e}) AND Sarvam fallback failed ({sarvam_e})")
+            else:
+                msg = str(e)
+                if "Device Guard" in msg or "Application Control" in msg or "WinError 4551" in msg:
+                    msg = (f"{msg}\n\n🚨 SYSTEM POLICY BLOCK: Your Windows Device Guard/Application Control policy "
+                           f"is blocking the local transcription binaries and libraries. "
+                           f"To fix this, please provide a GROQ_API_KEY (Free) or SARVAM_API_KEY in your environment to use cloud transcription.")
+                raise RuntimeError(msg)
     phrases = group_phrases(words)
 
     total = dur or (words[-1]["end"] if words else 0)
@@ -1223,6 +1404,7 @@ def run_pipeline(url, workdir, api_key, progress, language="en", music=False,
             logo_path=logo_file, logo_scale=logo_scale, logo_corner=logo_corner,
             captions=captions, jump_cut=(not full_mode),
             punchy=punchy, punch_zoom=punch_zoom, color_pop=color_pop,
+            auto_crop=auto_crop,
         )
         # Actual length after dead-space removal (falls back to the cut range).
         actual = _probe_duration(os.path.join(workdir, fname))

@@ -6,3 +6,9 @@ __pycache__/
 .git/
 .DS_Store
 /tmp/
+.env
+bin/
+*.log
+
+# SQLite database (users, jobs, usage) + session key
+data/

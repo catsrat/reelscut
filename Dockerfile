@@ -41,5 +41,11 @@ RUN mkdir -p models \
 ENV PORT=7860
 EXPOSE 7860
 
-# Shell form so $PORT expands. Single worker: job state is in memory, one at a time.
-CMD gunicorn -w 1 --threads 8 --timeout 0 --access-logfile - -b 0.0.0.0:$PORT app:app
+# Users, plans and the job queue live in SQLite under DATA_DIR. Mount a
+# persistent disk here, or every redeploy forgets accounts and minutes used.
+ENV DATA_DIR=/app/data
+
+# Shell form so $PORT expands. The job worker runs beside the web server; one
+# gunicorn worker because in-progress chunked uploads are tracked in memory.
+# The loop restarts the job worker if it ever crashes.
+CMD (while true; do python worker.py; sleep 5; done) & exec gunicorn -w 1 --threads 8 --timeout 0 --access-logfile - -b 0.0.0.0:$PORT app:app

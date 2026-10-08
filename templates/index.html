@@ -34,6 +34,19 @@
   .badge{font-size:12px; padding:6px 12px; border-radius:999px; font-weight:600;}
   .badge.on{background:rgba(95,227,154,.12); color:#5fe39a;}
   .badge.off{background:rgba(227,163,95,.12); color:#e3a35f;}
+  .acct{display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px; justify-content:space-between;
+        font-size:13px; color:var(--dim); margin:-18px 0 26px; padding:12px 16px;
+        border:1px solid var(--line); border-radius:14px; background:var(--glass);}
+  .acct b{color:var(--text); font-weight:700;}
+  .acct .meter{flex:1 1 160px; min-width:140px;}
+  .acct .bar{height:6px; border-radius:99px; background:rgba(255,255,255,.08); margin-top:6px; overflow:hidden;}
+  .acct .bar i{display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--accent2));}
+  .acct .actions{display:flex; gap:8px; align-items:center;}
+  .acct a.up{color:#fff; background:var(--accent); padding:6px 12px; border-radius:9px; font-weight:700; text-decoration:none;}
+  .acct form{margin:0;}
+  .acct button.out{background:none; border:1px solid var(--line); color:var(--dim); padding:6px 12px;
+        border-radius:9px; font:inherit; cursor:pointer;}
+  .err a{color:#fff; font-weight:700; margin-left:6px;}
 
   h1{font-size:clamp(32px,6vw,46px); line-height:1.05; margin:0 0 12px; font-weight:900; letter-spacing:-.03em;}
   h1 .grad{background:linear-gradient(100deg,var(--accent2),#ff7a8a); -webkit-background-clip:text; background-clip:text; color:transparent;}
@@ -176,6 +189,20 @@
     {% endif %}
   </div>
 
+  {% if accounts %}
+  <div class="acct">
+    <div class="meter">
+      <b>{{ user.name or 'Your account' }}</b> · {{ quota.plan }} plan ·
+      <span id="minLeft">{{ '%.0f' % quota.left }}</span> of {{ '%.0f' % quota.minutes }} min left this month
+      <div class="bar"><i id="minBar" style="width:{{ [100, (quota.used / quota.minutes * 100) if quota.minutes else 100] | min | round }}%"></i></div>
+    </div>
+    <div class="actions">
+      {% if quota.upgrade_url %}<a class="up" href="{{ quota.upgrade_url }}" target="_blank" rel="noopener">{{ 'Change plan' if quota.paid else 'Upgrade' }}</a>{% endif %}
+      <form method="post" action="/logout"><button class="out">Log out</button></form>
+    </div>
+  </div>
+  {% endif %}
+
   <h1>Turn any video into<br><span class="grad">viral reels.</span></h1>
   <p class="sub">Drop a long video. Our AI finds the best moments, reframes them vertical, and burns in captions — Telugu, Hindi & Tamil included.</p>
 
@@ -234,6 +261,7 @@
           <label class="check"><input type="checkbox" id="punchy"> Punchy captions — one big word at a time (Hormozi style)</label>
           <label class="check"><input type="checkbox" id="punchzoom"> Punch-in zoom — subtle motion so footage feels alive</label>
           <label class="check"><input type="checkbox" id="colorpop"> Color pop — vibrant, scroll-stopping colors</label>
+          <label class="check"><input type="checkbox" id="autocrop"> AI Face Tracking — keep the speaker centered in the crop</label>
         </div>
 
         <div class="logo-sec">
@@ -283,6 +311,7 @@
           <option value="yellow_punch">Yellow Punch (Hormozi-style)</option>
           <option value="green_pop">Green Pop</option>
           <option value="tiktok_tall">TikTok Tall (condensed)</option>
+          <option value="mrbeast">MrBeast style (bold & bright)</option>
           <option value="classic">Classic (Arial, mixed case)</option>
         </select>
         <label class="lbl" for="splitmode">Layout</label>
@@ -424,6 +453,7 @@ function opts(){
     punchy: document.getElementById('punchy').checked,
     punch_zoom: document.getElementById('punchzoom').checked,
     color_pop: document.getElementById('colorpop').checked,
+    auto_crop: document.getElementById('autocrop').checked,
     rules: document.getElementById('rules').value,
   };
 }
@@ -459,12 +489,21 @@ go.onclick = async () => {
     return;
   }
 
-  if (res.error) { fail(res.error); return; }
+  if (res.login) { location.href = res.login + '?next=/app'; return; }  // signed out
+  if (res.error) { fail(res.error, res.upgrade_url); return; }
   poll(res.job_id);
 };
 
-function fail(text){
-  msg.innerHTML = '<span class="err">' + text + '</span>';
+function fail(text, upgradeUrl){
+  const span = document.createElement('span');  // textContent: never render server text as HTML
+  span.className = 'err';
+  span.textContent = text;
+  if (upgradeUrl && /^https?:\/\//.test(upgradeUrl)) {
+    const a = document.createElement('a');
+    a.href = upgradeUrl; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Upgrade →';
+    span.appendChild(a);
+  }
+  msg.replaceChildren(span);
   go.disabled = false;
 }
 
@@ -474,18 +513,29 @@ function fail(text){
 // the host's single-request size limit that stalls a normal upload.
 async function chunkedUpload(file, o, logoFile){
   const CHUNK = 5 * 1024 * 1024;
-  const start = await (await fetch('/upload_start', {method:'POST'})).json();
+  const sfd = new FormData();
+  sfd.append('size', file.size);
+  const start = await (await fetch('/upload_start', {method:'POST', body: sfd})).json();
+  if (!start.upload_id) return start;  // e.g. busy / file too large
   const uid = start.upload_id;
   const total = Math.ceil(file.size / CHUNK) || 1;
   for (let i = 0; i < total; i++){
     const blob = file.slice(i * CHUNK, (i + 1) * CHUNK);
     const fd = new FormData();
     fd.append('upload_id', uid);
+    fd.append('offset', i * CHUNK);  // lets the server ignore a retried chunk it already has
     fd.append('chunk', blob);
     let ok = false;
     for (let attempt = 0; attempt < 4 && !ok; attempt++){
-      try { const r = await fetch('/upload_chunk', {method:'POST', body: fd}); ok = r.ok; }
+      let r = null;
+      try { r = await fetch('/upload_chunk', {method:'POST', body: fd}); ok = r.ok; }
       catch (_) { ok = false; }
+      // 4xx = the server refused it (too large, expired) — retrying won't help.
+      if (r && r.status >= 400 && r.status < 500) {
+        let err = 'Upload was refused. Please try again.';
+        try { err = (await r.json()).error || err; } catch (_) {}
+        return {error: err};
+      }
       if (!ok) await new Promise(r => setTimeout(r, 800));  // brief retry
     }
     if (!ok) throw new Error('chunk_failed');
@@ -509,13 +559,27 @@ async function poll(jobId){
   pctEl.textContent = (job.progress||0) + '%';
   msg.textContent = job.message || '';
 
-  if (job.status === 'error') { fail(job.message); return; }
+  if (job.login) { location.href = job.login + '?next=/app'; return; }  // signed out
+  if (job.status === 'error') { fail(job.message); refreshMinutes(); return; }
   if (job.status === 'done') {
     render(jobId, job.clips, job.compliance);
     go.disabled = false;
+    refreshMinutes();
     return;
   }
   setTimeout(() => poll(jobId), 1500);
+}
+
+// Update the "min left" meter after a job uses minutes.
+async function refreshMinutes(){
+  const left = document.getElementById('minLeft'), bar = document.getElementById('minBar');
+  if (!left) return;
+  try {
+    const q = await (await fetch('/me')).json();
+    if (q.left == null) return;
+    left.textContent = Math.round(q.left);
+    bar.style.width = Math.min(100, q.minutes ? q.used / q.minutes * 100 : 100) + '%';
+  } catch (_) {}
 }
 
 function renderCompliance(c){

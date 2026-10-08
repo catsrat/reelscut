@@ -6,3 +6,9 @@ __pycache__/
 .DS_Store
 .env
 *.log
+
+# Local Windows whisper.cpp binaries (Docker builds its own)
+bin/
+
+# SQLite database (users, jobs, usage) + session key
+data/
