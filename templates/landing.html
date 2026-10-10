@@ -408,7 +408,18 @@
     // "View content" = they scrolled to the plans and prices
     const pricing = document.getElementById('pricing');
     if (pricing) new IntersectionObserver((es, o) => es.forEach(en => {
-      if (en.isIntersecting) { rcTrack('ViewContent', {content_type: 'product', content_name: 'Reelscut plans'}); o.disconnect(); }
+      if (!en.isIntersecting) return;
+      o.disconnect();
+      // What they're looking at: the plans, under the same ids the plan
+      // buttons and the purchase event use (TikTok needs a content_id).
+      const plans = [...document.querySelectorAll('a.btn[data-plan]')].map(a => JSON.parse(a.dataset.plan));
+      const seen = plans.length
+        ? {content_type: 'product', contents: plans.map(p => Object.assign(
+            {content_id: p.content_id, content_type: 'product', content_name: p.content_name},
+            p.value != null ? {price: p.value} : {}))}
+        : {content_type: 'product', content_id: 'reelscut-plans', content_name: 'Reelscut plans'};
+      if (plans.length && plans[0].currency) seen.currency = plans[0].currency;
+      rcTrack('ViewContent', seen);
     }), {threshold: .25}).observe(pricing);
   }
 </script>

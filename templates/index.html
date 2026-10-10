@@ -266,7 +266,7 @@
         <div class="usage-bar"><i id="minBar" style="width:{{ [100, (quota.used / quota.minutes * 100) if quota.minutes else 100] | min | round }}%"></i></div>
       </div>
       <span class="chip plan">{{ quota.plan }}</span>
-      {% if quota.upgrade_url %}<a class="btn btn-primary btn-sm" href="{{ quota.upgrade_url }}" target="_blank" rel="noopener" onclick="if (window.rcTrack) rcTrack('InitiateCheckout', {content_type: 'product', content_name: 'Plans'})">{{ 'Change plan' if quota.paid else 'Upgrade' }}</a>{% endif %}
+      {% if quota.upgrade_url %}<a class="btn btn-primary btn-sm" href="{{ quota.upgrade_url }}" target="_blank" rel="noopener" onclick="if (window.rcTrack) rcTrack('InitiateCheckout', {content_type: 'product', content_id: 'reelscut-plans', content_name: 'Reelscut plans'})">{{ 'Change plan' if quota.paid else 'Upgrade' }}</a>{% endif %}
       <details class="menu">
         <summary class="avatar" aria-label="Account menu">{{ (user.name or 'Y')[:1] | upper }}</summary>
         <div class="menu-pop">
