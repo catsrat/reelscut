@@ -17,6 +17,7 @@ their own — no webhooks needed.
 """
 
 import os
+import re
 import time
 from dataclasses import dataclass
 
@@ -104,8 +105,43 @@ def current_plan(user, force=False):
         # Whop unreachable: keep the last known plan rather than downgrade a
         # paying user during an outage. Retry on the next request.
         return _plan_by_key(user["plan"])
+    if plan.minutes > _plan_by_key(user["plan"]).minutes:
+        # Moved up (free -> paid, or to a bigger plan): they just paid on Whop.
+        db.note_purchase(user["id"], plan.key)
     db.set_plan(user["id"], plan.key)
     return plan
+
+
+_CURRENCY = {"$": "USD", "€": "EUR", "£": "GBP", "₹": "INR"}
+
+
+def price_value(label):
+    """("$19/mo") -> (19.0, "USD"); (None, None) when the label has no clear
+    amount and currency. Ad pixels want the number, the page shows the label."""
+    m = re.search(r"(\d+(?:[.,]\d{1,2})?)", label or "")
+    cur = next((c for s, c in _CURRENCY.items() if s in (label or "")), None)
+    if not cur:
+        code = re.search(r"\b([A-Z]{3})\b", label or "")
+        cur = code.group(1) if code else None
+    if not m or not cur:
+        return None, None
+    return float(m.group(1).replace(",", ".")), cur
+
+
+def plan_event(plan):
+    """What the ad pixel is told about a plan (no user data)."""
+    event = {"content_type": "product", "content_id": plan.key, "content_name": plan.name}
+    value, cur = price_value(plan.price)
+    if value is not None:
+        event.update(value=value, currency=cur)
+    return event
+
+
+def pop_purchase_event(user):
+    """The pixel event for a plan this user just bought, once; else None."""
+    key = db.pop_purchase(user["id"])
+    plan = _plan_by_key(key) if key else FREE
+    return plan_event(plan) if plan is not FREE else None
 
 
 def quota(user, force=False):
