@@ -18,11 +18,31 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
   // Europe's time zones (EU, UK, EEA, Switzerland) need consent before tracking.
   var mustAsk = /^(Europe\/|Atlantic\/(Reykjavik|Canary|Madeira|Azores|Faroe)|Arctic\/)/.test(tz);
   var on = false;
-  function start() { if (!on) { on = true; ttq.load(ID); ttq.page(); } }
+  function cookie(name, value, days) {
+    document.cookie = name + '=' + value + '; path=/; max-age=' + Math.round(days * 86400) +
+      '; SameSite=Lax' + (location.protocol === 'https:' ? '; Secure' : '');
+  }
+  function start() {
+    if (on) return;
+    on = true;
+    // Tells the server it may send its matching events (tracking.py), and
+    // keeps the ad's click id for them.
+    cookie('rc_ads', '1', 365);
+    var click = new URLSearchParams(location.search).get('ttclid');
+    if (click && /^[\w.\-]{8,500}$/.test(click)) cookie('rc_ttclid', click, 30);
+    ttq.load(ID);
+    ttq.page();
+  }
   // Events before a yes are simply dropped: nothing is sent to TikTok.
-  window.rcTrack = function (name, props) { if (on) ttq.track(name, props || {}); };
+  // eventId pairs a page event with the server's copy so it's counted once.
+  window.rcTrack = function (name, props, eventId) {
+    if (on) ttq.track(name, props || {}, eventId ? {event_id: eventId} : {});
+  };
 
-  function remember(v) { try { localStorage.setItem(KEY, v); } catch (e) {} }
+  function remember(v) {
+    try { localStorage.setItem(KEY, v); } catch (e) {}
+    if (v === 'no') { cookie('rc_ads', '', 0); cookie('rc_ttclid', '', 0); }
+  }
   function banner() {
     var b = document.createElement('div');
     b.setAttribute('role', 'dialog');

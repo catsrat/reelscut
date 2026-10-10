@@ -74,7 +74,13 @@ def init():
     # touch a database that already exists).
     cols = {r["name"] for r in conn().execute("PRAGMA table_info(users)")}
     if "purchase_pending" not in cols:
-        conn().execute("ALTER TABLE users ADD COLUMN purchase_pending TEXT")
+        try:
+            conn().execute("ALTER TABLE users ADD COLUMN purchase_pending TEXT")
+        except sqlite3.OperationalError as e:
+            # The web app and the worker start together and both run this;
+            # whoever comes second finds the column already there.
+            if "duplicate column" not in str(e).lower():
+                raise
 
 
 # ---------------------------------------------------------------- users

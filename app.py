@@ -49,6 +49,7 @@ import auth
 import billing
 import db
 import pipeline
+import tracking
 
 GB = 1024 ** 3
 MB = 1024 ** 2
@@ -97,15 +98,12 @@ app.config.update(
 )
 app.register_blueprint(auth.bp)
 
-# TikTok Pixel for ad measurement (templates/_tiktok.html). A pixel ID is public
-# — it's in the page source — so the default lives here; set TIKTOK_PIXEL_ID=""
-# to turn it off. Never loaded in local mode, so testing doesn't count as visits.
-TIKTOK_PIXEL_ID = os.environ.get("TIKTOK_PIXEL_ID", "DB5A7HBC77U6DDDLBL6G").strip()
-
-
+# TikTok Pixel for ad measurement (templates/_tiktok.html; server-side twin in
+# tracking.py). Set TIKTOK_PIXEL_ID="" to turn it off. Never loaded in local
+# mode, so testing doesn't count as visits.
 @app.context_processor
 def _tracking():
-    return {"tiktok_pixel": TIKTOK_PIXEL_ID if auth.enabled() else ""}
+    return {"tiktok_pixel": tracking.PIXEL_ID if auth.enabled() else ""}
 
 JOBS_DIR = os.path.join(ROOT, "jobs")
 os.makedirs(JOBS_DIR, exist_ok=True)
@@ -334,13 +332,23 @@ def index(user):
     # Drive links work with no setup at all (they don't block servers).
     show_link = pipeline.ytdlp_available()
     q = billing.quota(user)  # also notices a plan bought since the last check
+    # Ad measurement. Each event goes out twice with one id — from the page
+    # (pixel) and from here (Events API) — and TikTok counts it once.
+    signup_id = session.pop("new_user", None)  # set at sign-in for a new account
+    if signup_id and not isinstance(signup_id, str):
+        signup_id = uuid.uuid4().hex  # a session from before ids were stored
+    purchase = purchase_id = None
+    if tracking.PIXEL_ID and auth.enabled():
+        # A plan bought on Whop since the last visit, reported once.
+        purchase = billing.pop_purchase_event(user)
+        if purchase:
+            purchase_id = uuid.uuid4().hex
+            tracking.send("Purchase", purchase_id, purchase, user_id=user["id"])
     return render_template(
         "index.html", has_key=has_key, show_link=show_link, yt_enabled=_yt_enabled(),
         fetch_enabled=FETCH_ENABLED,
-        new_user=bool(session.pop("new_user", None)),  # first visit after signing up
+        signup_id=signup_id, purchase=purchase, purchase_id=purchase_id,
         user=user, quota=billing.quota_json(q),
-        # A plan bought on Whop since the last visit, reported once to the pixel.
-        purchase=billing.pop_purchase_event(user) if TIKTOK_PIXEL_ID and auth.enabled() else None,
         accounts=auth.enabled(), max_upload=_size_label(MAX_UPLOAD_BYTES),
     )
 
