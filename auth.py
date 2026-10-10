@@ -154,11 +154,14 @@ def callback():
     user_id = profile.get("sub")
     if not user_id:
         return _fail("Whop didn't tell us who you are.")
+    is_new = db.get_user(user_id) is None
     db.upsert_user(user_id, email=profile.get("email"),
                    name=profile.get("name") or profile.get("preferred_username"))
     session.clear()  # fresh session after login (no fixation)
     session.permanent = True
     session["uid"] = user_id
+    if is_new:
+        session["new_user"] = True  # the app page reports one sign-up, then drops it
     return redirect(oauth["next"])
 
 

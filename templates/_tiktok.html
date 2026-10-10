@@ -1,0 +1,59 @@
+{# TikTok Pixel (ads measurement). Included in <head> when a pixel ID is set.
+   Outside Europe it loads right away. In Europe (EU/UK privacy rules need a
+   yes first) it loads only after the visitor accepts the small banner; the
+   answer is remembered in this browser. No emails or phone numbers are sent. #}
+{% if tiktok_pixel %}
+<script>
+!function (w, d, t) {
+  w.TiktokAnalyticsObject=t;var ttq=w[t]=w[t]||[];ttq.methods=["page","track","identify","instances","debug","on","off","once","ready","alias","group","enableCookie","disableCookie","holdConsent","revokeConsent","grantConsent"],ttq.setAndDefer=function(t,e){t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}};for(var i=0;i<ttq.methods.length;i++)ttq.setAndDefer(ttq,ttq.methods[i]);ttq.instance=function(t){for(
+var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n]);return e},ttq.load=function(e,n){var r="https://analytics.tiktok.com/i18n/pixel/events.js",o=n&&n.partner;ttq._i=ttq._i||{},ttq._i[e]=[],ttq._i[e]._u=r,ttq._t=ttq._t||{},ttq._t[e]=+new Date,ttq._o=ttq._o||{},ttq._o[e]=n||{};n=document.createElement("script")
+;n.type="text/javascript",n.async=!0,n.src=r+"?sdkid="+e+"&lib="+t;e=document.getElementsByTagName("script")[0];e.parentNode.insertBefore(n,e)};
+}(window, document, 'ttq');
+
+(function () {
+  var ID = {{ tiktok_pixel|tojson }}, KEY = 'rc_ads_ok';
+  var choice = null, tz = '';
+  try { choice = localStorage.getItem(KEY); } catch (e) {}
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+  // Europe's time zones (EU, UK, EEA, Switzerland) need consent before tracking.
+  var mustAsk = /^(Europe\/|Atlantic\/(Reykjavik|Canary|Madeira|Azores|Faroe)|Arctic\/)/.test(tz);
+  var on = false;
+  function start() { if (!on) { on = true; ttq.load(ID); ttq.page(); } }
+  // Events before a yes are simply dropped: nothing is sent to TikTok.
+  window.rcTrack = function (name, props) { if (on) ttq.track(name, props || {}); };
+
+  function remember(v) { try { localStorage.setItem(KEY, v); } catch (e) {} }
+  function banner() {
+    var b = document.createElement('div');
+    b.setAttribute('role', 'dialog');
+    b.setAttribute('aria-label', 'Ad measurement');
+    b.style.cssText = 'position:fixed;left:16px;right:16px;bottom:16px;z-index:9999;max-width:560px;' +
+      'margin:0 auto;padding:14px 16px;border-radius:14px;background:#19191c;color:#f4f4f5;' +
+      'border:1px solid rgba(255,255,255,.12);box-shadow:0 12px 40px rgba(0,0,0,.5);' +
+      'font:14px/1.45 Inter,system-ui,sans-serif;display:flex;gap:12px;align-items:center;flex-wrap:wrap';
+    var p = document.createElement('span');
+    p.style.cssText = 'flex:1 1 240px;color:#a1a1aa';
+    p.textContent = 'We use a TikTok pixel to see which ads bring people to Reelscut. OK to turn it on?';
+    function btn(label, primary, fn) {
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = label;
+      x.style.cssText = 'height:36px;padding:0 14px;border-radius:10px;font:600 13px Inter,system-ui,sans-serif;' +
+        'cursor:pointer;border:1px solid ' + (primary ? 'transparent' : 'rgba(255,255,255,.12)') +
+        ';background:' + (primary ? '#ff3b4e' : 'transparent') + ';color:' + (primary ? '#fff' : '#f4f4f5');
+      x.onclick = function () { fn(); b.remove(); };
+      return x;
+    }
+    b.appendChild(p);
+    b.appendChild(btn('No thanks', false, function () { remember('no'); }));
+    b.appendChild(btn('Accept', true, function () { remember('yes'); start(); }));
+    document.body.appendChild(b);
+  }
+
+  if (!mustAsk || choice === 'yes') start();
+  else if (choice !== 'no') {
+    if (document.body) banner(); else document.addEventListener('DOMContentLoaded', banner);
+  }
+})();
+</script>
+{% endif %}

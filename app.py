@@ -24,7 +24,7 @@ import uuid
 from datetime import timedelta
 
 from flask import (
-    Flask, render_template, request, jsonify, send_from_directory, abort
+    Flask, render_template, request, jsonify, send_from_directory, abort, session
 )
 from urllib.parse import urlencode
 
@@ -96,6 +96,16 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(days=30),
 )
 app.register_blueprint(auth.bp)
+
+# TikTok Pixel for ad measurement (templates/_tiktok.html). A pixel ID is public
+# — it's in the page source — so the default lives here; set TIKTOK_PIXEL_ID=""
+# to turn it off. Never loaded in local mode, so testing doesn't count as visits.
+TIKTOK_PIXEL_ID = os.environ.get("TIKTOK_PIXEL_ID", "DB5A7HBC77U6DDDLBL6G").strip()
+
+
+@app.context_processor
+def _tracking():
+    return {"tiktok_pixel": TIKTOK_PIXEL_ID if auth.enabled() else ""}
 
 JOBS_DIR = os.path.join(ROOT, "jobs")
 os.makedirs(JOBS_DIR, exist_ok=True)
@@ -325,6 +335,7 @@ def index(user):
     return render_template(
         "index.html", has_key=has_key, show_link=show_link, yt_enabled=_yt_enabled(),
         fetch_enabled=FETCH_ENABLED,
+        new_user=bool(session.pop("new_user", None)),  # first visit after signing up
         user=user, quota=billing.quota_json(billing.quota(user)),
         accounts=auth.enabled(), max_upload=_size_label(MAX_UPLOAD_BYTES),
     )
