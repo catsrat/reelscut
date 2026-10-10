@@ -28,6 +28,7 @@ from flask import (
 
 import billing
 import db
+import tracking
 
 WHOP_OAUTH = "https://api.whop.com/oauth"
 SCOPES = "openid profile email"
@@ -161,7 +162,11 @@ def callback():
     session.permanent = True
     session["uid"] = user_id
     if is_new:
-        session["new_user"] = True  # the app page reports one sign-up, then drops it
+        # Ad measurement: one sign-up, reported from here (Events API) and by
+        # the app page (pixel) under the same id, so it's counted once.
+        session["new_user"] = secrets.token_hex(16)
+        tracking.send("CompleteRegistration", session["new_user"],
+                      user_id=user_id, page_path="/app")
     return redirect(oauth["next"])
 
 
