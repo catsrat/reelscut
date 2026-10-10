@@ -305,7 +305,8 @@ def too_large(_e):
 def landing():
     # Pricing section comes straight from the same settings billing uses, so
     # the page can never advertise different minutes than users actually get.
-    plans = [{"name": p.name, "minutes": p.minutes, "price": p.price, "url": p.url}
+    plans = [{"name": p.name, "minutes": p.minutes, "price": p.price, "url": p.url,
+              "event": billing.plan_event(p)}  # for the ad pixel, on the plan's button
              for p in sorted(billing.paid_plans(), key=lambda p: p.minutes)]
     return render_template(
         "landing.html", free_minutes=billing.FREE.minutes, plans=plans,
@@ -332,11 +333,14 @@ def index(user):
     # Show the link tab whenever yt-dlp is available: Kick replays and Google
     # Drive links work with no setup at all (they don't block servers).
     show_link = pipeline.ytdlp_available()
+    q = billing.quota(user)  # also notices a plan bought since the last check
     return render_template(
         "index.html", has_key=has_key, show_link=show_link, yt_enabled=_yt_enabled(),
         fetch_enabled=FETCH_ENABLED,
         new_user=bool(session.pop("new_user", None)),  # first visit after signing up
-        user=user, quota=billing.quota_json(billing.quota(user)),
+        user=user, quota=billing.quota_json(q),
+        # A plan bought on Whop since the last visit, reported once to the pixel.
+        purchase=billing.pop_purchase_event(user) if TIKTOK_PIXEL_ID and auth.enabled() else None,
         accounts=auth.enabled(), max_upload=_size_label(MAX_UPLOAD_BYTES),
     )
 

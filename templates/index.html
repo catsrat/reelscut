@@ -9,6 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 {% include "_tiktok.html" %}
 {% if new_user %}<script>if (window.rcTrack) rcTrack('CompleteRegistration');</script>{% endif %}
+{% if purchase %}<script>if (window.rcTrack) rcTrack('Purchase', {{ purchase|tojson }});</script>{% endif %}
 <style>
   :root{
     --bg:#0b0b0c; --surface:#131315; --surface-2:#19191c; --surface-3:#222226;
@@ -265,7 +266,7 @@
         <div class="usage-bar"><i id="minBar" style="width:{{ [100, (quota.used / quota.minutes * 100) if quota.minutes else 100] | min | round }}%"></i></div>
       </div>
       <span class="chip plan">{{ quota.plan }}</span>
-      {% if quota.upgrade_url %}<a class="btn btn-primary btn-sm" href="{{ quota.upgrade_url }}" target="_blank" rel="noopener">{{ 'Change plan' if quota.paid else 'Upgrade' }}</a>{% endif %}
+      {% if quota.upgrade_url %}<a class="btn btn-primary btn-sm" href="{{ quota.upgrade_url }}" target="_blank" rel="noopener" onclick="if (window.rcTrack) rcTrack('InitiateCheckout', {content_type: 'product', content_name: 'Plans'})">{{ 'Change plan' if quota.paid else 'Upgrade' }}</a>{% endif %}
       <details class="menu">
         <summary class="avatar" aria-label="Account menu">{{ (user.name or 'Y')[:1] | upper }}</summary>
         <div class="menu-pop">

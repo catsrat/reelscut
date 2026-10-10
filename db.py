@@ -70,6 +70,11 @@ def conn():
 
 def init():
     conn().executescript(SCHEMA)
+    # Columns added after the first release (CREATE TABLE IF NOT EXISTS doesn't
+    # touch a database that already exists).
+    cols = {r["name"] for r in conn().execute("PRAGMA table_info(users)")}
+    if "purchase_pending" not in cols:
+        conn().execute("ALTER TABLE users ADD COLUMN purchase_pending TEXT")
 
 
 # ---------------------------------------------------------------- users
@@ -91,6 +96,28 @@ def get_user(user_id):
 def set_plan(user_id, plan):
     conn().execute("UPDATE users SET plan = ?, plan_checked_at = ? WHERE id = ?",
                    (plan, time.time(), user_id))
+
+
+def note_purchase(user_id, plan):
+    """Remember that this user just moved up to `plan`, so the app page can
+    report it once to the ad pixel (the payment itself happens on Whop)."""
+    conn().execute("UPDATE users SET purchase_pending = ? WHERE id = ?", (plan, user_id))
+
+
+def pop_purchase(user_id):
+    """The plan key noted by note_purchase, cleared so it's reported once."""
+    c = conn()
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        row = c.execute("SELECT purchase_pending FROM users WHERE id = ?", (user_id,)).fetchone()
+        plan = row["purchase_pending"] if row else None
+        if plan:
+            c.execute("UPDATE users SET purchase_pending = NULL WHERE id = ?", (user_id,))
+        c.execute("COMMIT")
+    except Exception:
+        c.execute("ROLLBACK")
+        raise
+    return plan
 
 
 def month_start():
